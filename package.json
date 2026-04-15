@@ -1,0 +1,35 @@
+{
+  "name": "gtfo",
+  "version": "0.1.0",
+  "description": "Glean Tab For Obsidian -- agentic workbench with Glean MCP, embedded terminal, and vault tools",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production",
+    "link": "bash scripts/dev.sh",
+    "rebuild-native": "bash scripts/rebuild-native.sh"
+  },
+  "keywords": [
+    "obsidian",
+    "glean",
+    "mcp",
+    "terminal"
+  ],
+  "author": "Patrick Lynch",
+  "license": "MIT",
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.3",
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.21.0",
+    "obsidian": "latest",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0"
+  },
+  "optionalDependencies": {
+    "node-pty": "^1.0.0"
+  }
+}

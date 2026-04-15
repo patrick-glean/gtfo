@@ -1,0 +1,9 @@
+{
+  "id": "gtfo",
+  "name": "Glean Tab For Obsidian",
+  "version": "0.1.0",
+  "minAppVersion": "1.0.0",
+  "description": "Agentic workbench connecting Glean enterprise knowledge, an embedded terminal, and vault tools inside Obsidian.",
+  "author": "Patrick Lynch",
+  "isDesktopOnly": true
+}

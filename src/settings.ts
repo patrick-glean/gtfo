@@ -155,6 +155,55 @@ export class GtfoSettingTab extends PluginSettingTab {
           }),
       );
 
+    // --- Vault Context ---
+    containerEl.createEl("h3", { text: "Vault Context" });
+
+    new Setting(containerEl)
+      .setName("Include vault listing in chat context")
+      .setDesc(
+        "Send a compact tree of your notes (paths, tags, first headings) with every chat message. Lets the LLM reference real files by name, propose edits, and organize your vault. The debug folder is always excluded.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.includeVaultListing)
+          .onChange(async (value) => {
+            this.plugin.settings.includeVaultListing = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Additional folder exclusions")
+      .setDesc(
+        "Comma-separated folder prefixes to exclude from the listing (e.g. 'archive, journal/private').",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("archive, private/")
+          .setValue(this.plugin.settings.vaultListingExcludes)
+          .onChange(async (value) => {
+            this.plugin.settings.vaultListingExcludes = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Listing size cap (chars)")
+      .setDesc(
+        "When the full listing exceeds this, it degrades to a folder summary. Raise if you want more detail, lower if you hit context limits.",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("6000")
+          .setValue(String(this.plugin.settings.vaultListingMaxChars))
+          .onChange(async (value) => {
+            const parsed = parseInt(value, 10);
+            this.plugin.settings.vaultListingMaxChars =
+              Number.isFinite(parsed) && parsed > 0 ? parsed : 6000;
+            await this.plugin.saveSettings();
+          }),
+      );
+
     // --- Terminal ---
     containerEl.createEl("h3", { text: "Terminal" });
 

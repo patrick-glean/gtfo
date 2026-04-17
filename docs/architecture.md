@@ -112,6 +112,28 @@ User clicks "New chat" (toolbar) or runs the
 
 The Glean-side chat isn't explicitly ended — dropping the `chatId` is enough for the next send to start a new conversation server-side.
 
+### Runtime context injection
+
+Every outgoing chat message is prepended with a short runtime block built from Obsidian's APIs, so the LLM doesn't have to guess:
+
+```
+User sends message
+  → ChatTab.sendMessage("chat")
+  → buildRuntimeContext({ vaultName })
+    - today's date, local time, timezone, vault name
+  → VaultTools.listVaultEntries({ excludePrefixes: [debugFolder, ...user] })
+    - app.vault.getMarkdownFiles() for the file list
+    - app.metadataCache.getFileCache(file) for tags + first heading
+  → buildVaultListing(entries, { maxChars, vaultName })
+    - Tree-grouped, tag-annotated
+    - Degrades to folder summary above maxChars
+  → runtimeBlock = runtime + listing
+  → On first turn:   bootstrap + runtimeBlock + "User: ${text}"
+    On later turns:  runtimeBlock + text
+```
+
+The `metadataCache` integration is notable — we don't build our own index. Obsidian already parses every note into a fresh `CachedMetadata` record (frontmatter, tags, headings, links, embeds). Reading it is O(1) per file, so rebuilding the listing on every chat turn is essentially free even for vaults with thousands of notes.
+
 ### LLM action execution
 
 ```

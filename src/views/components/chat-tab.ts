@@ -5,6 +5,7 @@ import {
   parseLlmResponse,
   DEFAULT_BOOTSTRAP,
   buildRuntimeContext,
+  buildVaultListing,
   expandTemplatePlaceholders,
   titleFromPath,
   type LlmAction,
@@ -176,12 +177,15 @@ export class ChatTab {
         // not just the first. The bootstrap gives the LLM its persona
         // and protocol once; the runtime block keeps it anchored to
         // real time on every send, even across day boundaries.
-        const runtime = buildRuntimeContext({
-          vaultName: this.plugin.app.vault.getName(),
-        });
+        const vaultName = this.plugin.app.vault.getName();
+        const runtime = buildRuntimeContext({ vaultName });
+        const listing = this.buildVaultListingBlock(vaultName);
+        const runtimeBlock = listing
+          ? `${runtime}\n\n${listing}`
+          : runtime;
         const fullMessage = this.chatId
-          ? `${runtime}\n\n${text}`
-          : `${bootstrap}\n\n${runtime}\n\n---\n\nUser: ${text}`;
+          ? `${runtimeBlock}\n\n${text}`
+          : `${bootstrap}\n\n${runtimeBlock}\n\n---\n\nUser: ${text}`;
 
         const response = await this.plugin.mcpClient.chat(
           fullMessage,
@@ -273,6 +277,38 @@ export class ChatTab {
       return new Blob([JSON.stringify(response)]).size;
     } catch {
       return 0;
+    }
+  }
+
+  /**
+   * Build the vault-listing block that ships alongside the runtime
+   * context. Returns "" when the feature is disabled, the vault is
+   * empty, or something throws (metadataCache occasionally isn't
+   * ready immediately after plugin load — degrade silently).
+   */
+  private buildVaultListingBlock(vaultName: string): string {
+    const s = this.plugin.settings;
+    if (!s.includeVaultListing) return "";
+    try {
+      const userExcludes = (s.vaultListingExcludes ?? "")
+        .split(",")
+        .map((p) => p.trim())
+        .filter(Boolean);
+      // Always exclude the debug folder — those notes are our own
+      // output and would balloon the context on every turn.
+      const excludes = s.debugFolder
+        ? [s.debugFolder, ...userExcludes]
+        : userExcludes;
+      const entries = this.plugin.vaultTools.listVaultEntries({
+        excludePrefixes: excludes,
+      });
+      return buildVaultListing(entries, {
+        maxChars: s.vaultListingMaxChars,
+        vaultName,
+      });
+    } catch (e) {
+      console.warn("[GTFO] vault listing failed:", e);
+      return "";
     }
   }
 
@@ -415,28 +451,7 @@ export class ChatTab {
     );
 
     if (parsed?.actions && parsed.actions.length > 0) {
-      const actionsEl = msgEl.createDiv({ cls: "gtfo-chat-actions" });
-      actionsEl.createDiv({
-        cls: "gtfo-chat-actions-label",
-        text: `${parsed.actions.length} action${parsed.actions.length > 1 ? "s" : ""} proposed:`,
-      });
-
-      for (const action of parsed.actions) {
-        const actionEl = actionsEl.createDiv({ cls: "gtfo-chat-action-item" });
-        const desc = this.describeAction(action);
-        actionEl.createSpan({ cls: "gtfo-chat-action-desc", text: desc });
-
-        const execBtn = actionEl.createEl("button", {
-          text: "Execute",
-          cls: "gtfo-result-btn gtfo-action-btn",
-        });
-        execBtn.addEventListener("click", async () => {
-          await this.executeAction(action);
-          execBtn.textContent = "Done";
-          execBtn.disabled = true;
-          execBtn.addClass("gtfo-action-btn--done");
-        });
-      }
+      this.renderActions(msgEl, parsed.actions);
     }
 
     const actions = msgEl.createDiv({ cls: "gtfo-chat-message-actions" });
@@ -481,6 +496,95 @@ export class ChatTab {
     });
   }
 
+  /**
+   * Render the actions block under an assistant message. When the LLM
+   * proposes multiple actions (e.g. an organize-vault batch of move_note),
+   * an "Execute all" button runs them sequentially so the user doesn't
+   * have to click each row individually.
+   */
+  private renderActions(msgEl: HTMLElement, actions: LlmAction[]): void {
+    const actionsEl = msgEl.createDiv({ cls: "gtfo-chat-actions" });
+    const headerEl = actionsEl.createDiv({ cls: "gtfo-chat-actions-header" });
+    headerEl.createDiv({
+      cls: "gtfo-chat-actions-label",
+      text: `${actions.length} action${actions.length > 1 ? "s" : ""} proposed:`,
+    });
+
+    type Row = {
+      action: LlmAction;
+      btn: HTMLButtonElement;
+      done: boolean;
+    };
+    const rows: Row[] = [];
+
+    const markRow = (row: Row, ok: boolean): void => {
+      row.done = true;
+      row.btn.disabled = true;
+      row.btn.textContent = ok ? "Done" : "Failed";
+      row.btn.removeClass("gtfo-action-btn--done");
+      row.btn.removeClass("gtfo-action-btn--failed");
+      row.btn.addClass(ok ? "gtfo-action-btn--done" : "gtfo-action-btn--failed");
+    };
+
+    let execAllBtn: HTMLButtonElement | null = null;
+    if (actions.length > 1) {
+      execAllBtn = headerEl.createEl("button", {
+        text: `Execute all (${actions.length})`,
+        cls: "gtfo-result-btn gtfo-action-btn gtfo-chat-actions-execall",
+      });
+      execAllBtn.addEventListener("click", async () => {
+        if (!execAllBtn) return;
+        execAllBtn.disabled = true;
+        const originalText = execAllBtn.textContent ?? "Execute all";
+        let okCount = 0;
+        let failCount = 0;
+        const pending = rows.filter((r) => !r.done);
+        for (let i = 0; i < pending.length; i++) {
+          const row = pending[i];
+          execAllBtn.textContent = `Running ${i + 1}/${pending.length}...`;
+          const ok = await this.executeAction(row.action);
+          markRow(row, ok);
+          if (ok) okCount++;
+          else failCount++;
+        }
+        execAllBtn.textContent =
+          failCount > 0
+            ? `Done — ${okCount} ok, ${failCount} failed`
+            : `Done (${okCount})`;
+        execAllBtn.removeClass("gtfo-action-btn--done");
+        execAllBtn.addClass("gtfo-action-btn--done");
+        if (!execAllBtn.textContent) execAllBtn.textContent = originalText;
+      });
+    }
+
+    for (const action of actions) {
+      const actionEl = actionsEl.createDiv({ cls: "gtfo-chat-action-item" });
+      const desc = this.describeAction(action);
+      // Full description on the title attribute so the user can see paths
+      // that get truncated by the row's text-overflow: ellipsis.
+      actionEl.createSpan({
+        cls: "gtfo-chat-action-desc",
+        text: desc,
+        attr: { title: desc },
+      });
+
+      const execBtn = actionEl.createEl("button", {
+        text: "Execute",
+        cls: "gtfo-result-btn gtfo-action-btn",
+      });
+      const row: Row = { action, btn: execBtn, done: false };
+      rows.push(row);
+
+      execBtn.addEventListener("click", async () => {
+        if (row.done) return;
+        execBtn.disabled = true;
+        execBtn.textContent = "Running...";
+        const ok = await this.executeAction(action);
+        markRow(row, ok);
+      });
+    }
+  }
+
   private describeAction(action: LlmAction): string {
     switch (action.type) {
       case "create_note":
@@ -502,7 +606,7 @@ export class ChatTab {
     }
   }
 
-  private async executeAction(action: LlmAction): Promise<void> {
+  private async executeAction(action: LlmAction): Promise<boolean> {
     const { vaultTools, gateway } = this.plugin;
 
     // Defensive fallback: LLMs sometimes emit {{date}} / {{time}} / {{title}}
@@ -539,6 +643,7 @@ export class ChatTab {
           if (content) {
             const ok = await vaultTools.insertAtCursor(content);
             new Notice(ok ? "Inserted at cursor" : "No active editor");
+            if (!ok) return false;
           }
           break;
         case "move_note":
@@ -561,11 +666,14 @@ export class ChatTab {
                 ? `Command succeeded`
                 : `Command failed (exit ${result.exitCode})`,
             );
+            if (result.exitCode !== 0) return false;
           }
           break;
       }
+      return true;
     } catch (e) {
       new Notice(`Action failed: ${e}`);
+      return false;
     }
   }
 

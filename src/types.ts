@@ -10,6 +10,9 @@ export interface GtfoSettings {
   terminalFontSize: number;
   debugMode: boolean;
   debugFolder: string;
+  includeVaultListing: boolean;
+  vaultListingExcludes: string;
+  vaultListingMaxChars: number;
 }
 
 export const DEFAULT_SETTINGS: GtfoSettings = {
@@ -24,7 +27,19 @@ export const DEFAULT_SETTINGS: GtfoSettings = {
   terminalFontSize: 13,
   debugMode: false,
   debugFolder: "gtfo-debug",
+  includeVaultListing: true,
+  vaultListingExcludes: "",
+  vaultListingMaxChars: 6000,
 };
+
+export interface VaultEntry {
+  path: string;
+  name: string;
+  folder: string;
+  tags: string[];
+  h1: string | null;
+  mtime: number;
+}
 
 export interface GleanSearchResult {
   title: string;

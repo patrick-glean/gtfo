@@ -355,13 +355,24 @@
   background: var(--gtfo-surface-1);
 }
 
+.gtfo-chat-actions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
 .gtfo-chat-actions-label {
   font-size: 10px;
   font-weight: 600;
   color: var(--gtfo-accent);
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  margin-bottom: 6px;
+}
+
+.gtfo-chat-actions-execall {
+  flex-shrink: 0;
 }
 
 .gtfo-chat-action-item {
@@ -381,6 +392,13 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  cursor: default;
+  flex: 1;
+  min-width: 0;
+}
+
+.gtfo-chat-action-desc:hover {
+  color: var(--gtfo-accent);
 }
 
 /* ------- Message action buttons ------- */
@@ -427,6 +445,18 @@
   border-color: var(--gtfo-border) !important;
   color: var(--gtfo-text-muted) !important;
   cursor: default;
+}
+
+.gtfo-action-btn--failed {
+  opacity: 0.85;
+  border-color: var(--text-error, #c0392b) !important;
+  color: var(--text-error, #c0392b) !important;
+  cursor: default;
+}
+
+.gtfo-action-btn--failed:hover {
+  background: transparent !important;
+  color: var(--text-error, #c0392b) !important;
 }
 
 /* ------- Chat input area ------- */

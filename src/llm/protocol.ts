@@ -5,6 +5,8 @@
  * The plugin parses it to render UI and execute actions.
  */
 
+import type { VaultEntry } from "../types";
+
 export interface LlmResponse {
   title: string;
   body: string;
@@ -55,6 +57,10 @@ All available action types:
 - {"type": "link_notes", "path": "source.md", "targetPath": "target.md"}
 - {"type": "run_command", "command": "shell command to execute"}
 
+When a "Vault listing" block is present in the runtime context, treat it as the authoritative inventory of the user's vault. Each line is: a leading "- ", then the full vault-relative path (which includes the .md extension and may contain spaces and dashes, e.g. meetings/Meeting - 2_30 PM Today.md), then optionally two spaces and a quoted heading, then optionally two spaces and a list of #tags. COPY paths verbatim from the listing into action.path / action.targetPath — never reconstruct them from parts, never strip the .md, never split on dashes.
+
+ORGANIZING: When the user asks to organize, clean up, reorganize, or sort their vault, read the vault listing and propose a sequence of move_note actions in a single response. The user has an "Execute all" button to run them as a batch, so you can propose many at once. Group by name prefix, tags, or obvious topic. Keep proposals conservative — don't rename files, don't change content, only move. Put the rationale in the body so the user can review before executing.
+
 For pure Q&A with no vault operation requested, omit the actions array.
 ALWAYS respond with valid JSON only.`;
 
@@ -92,6 +98,76 @@ export function buildRuntimeContext(
     `When a note needs a date or time, write the actual value -- ` +
     `never emit template placeholders like {{date}} or {{date:YYYY-MM-DD}}.)`
   );
+}
+
+/**
+ * Format a vault listing as a flat list of full paths for LLM context.
+ *
+ * The format is deliberately flat (one full vault-relative path per line,
+ * `.md` included) instead of a tree. Tree formatting is more compact but
+ * forces the LLM to reconstruct paths from indented filenames + parent
+ * folder labels, which is fragile when filenames contain dashes or other
+ * "structural-looking" characters (e.g. "Meeting - 2_30 PM Today.md").
+ *
+ * Per-line format:
+ *   - {path}[  "{h1}"][  #tag1 #tag2]
+ *
+ * Two-space separators after the path act as field delimiters; the `.md`
+ * extension acts as a visual terminator for the path. Quotes around the
+ * H1 keep it unambiguous when it contains spaces, dashes, or punctuation.
+ *
+ * The result is capped at `maxChars` — when the full listing would
+ * exceed the cap, we drop to a folder-only summary with counts so the
+ * LLM can still reason about structure without blowing the context window.
+ */
+export function buildVaultListing(
+  entries: VaultEntry[],
+  opts: { maxChars?: number; vaultName?: string } = {},
+): string {
+  if (entries.length === 0) return "";
+  const max = opts.maxChars ?? 6000;
+
+  const header =
+    `Vault listing${opts.vaultName ? ` (${opts.vaultName})` : ""} — ` +
+    `${entries.length} note${entries.length === 1 ? "" : "s"}. ` +
+    `Use these vault-relative paths verbatim (including the .md extension) ` +
+    `when proposing edit_note / move_note / append_note / link_notes actions:`;
+  const lines: string[] = [header];
+
+  for (const e of entries) {
+    let line = `- ${e.path}`;
+    // Show the H1 only when it adds signal beyond the filename
+    if (
+      e.h1 &&
+      e.h1.trim() &&
+      e.h1.trim().toLowerCase() !== e.name.toLowerCase()
+    ) {
+      line += `  "${e.h1.trim().replace(/"/g, '\\"')}"`;
+    }
+    if (e.tags.length > 0) {
+      line += `  ${e.tags.map((t) => `#${t}`).join(" ")}`;
+    }
+    lines.push(line);
+  }
+
+  const full = lines.join("\n");
+  if (full.length <= max) return full;
+
+  // Fall back to a folder-only summary so the LLM can still reason about
+  // structure without blowing the context budget.
+  const byFolder = new Map<string, number>();
+  for (const e of entries) {
+    const f = e.folder || "(root)";
+    byFolder.set(f, (byFolder.get(f) ?? 0) + 1);
+  }
+  const folderLines = [...byFolder.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([f, n]) => `- ${f}: ${n} note${n === 1 ? "" : "s"}`);
+  const truncatedHeader =
+    `Vault listing${opts.vaultName ? ` (${opts.vaultName})` : ""} — ` +
+    `${entries.length} notes (full listing was ${Math.round(full.length / 1024)}KB; ` +
+    `showing folder summary only — ask the user to narrow the scope or use Opt+Enter search to find specific files):`;
+  return [truncatedHeader, ...folderLines].join("\n");
 }
 
 /**

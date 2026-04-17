@@ -1,5 +1,6 @@
 import type GtfoPlugin from "../../main";
-import { Notice } from "obsidian";
+import { Notice, Menu } from "obsidian";
+import type { TerminalLaunchPreset } from "../../types";
 
 type XTermTerminal = {
   open: (el: HTMLElement) => void;
@@ -29,6 +30,7 @@ export class TerminalTab {
   private resizeObserver: ResizeObserver | null = null;
   private disposables: { dispose: () => void }[] = [];
   private terminalEl: HTMLElement | null = null;
+  private initStarted = false;
 
   constructor(container: HTMLElement, plugin: GtfoPlugin) {
     this.container = container;
@@ -40,21 +42,31 @@ export class TerminalTab {
 
     const toolbar = wrapper.createDiv({ cls: "gtfo-terminal-toolbar" });
 
+    const launchBtn = toolbar.createEl("button", {
+      text: "Launch ▾",
+      cls: "gtfo-terminal-btn gtfo-terminal-btn--primary",
+      attr: { title: "Run a preset command in this shell" },
+    });
+    launchBtn.addEventListener("click", (evt) => this.openLaunchMenu(evt));
+
     const newBtn = toolbar.createEl("button", {
       text: "New",
       cls: "gtfo-terminal-btn",
+      attr: { title: "Restart the shell" },
     });
     newBtn.addEventListener("click", () => this.restartShell());
 
     const killBtn = toolbar.createEl("button", {
       text: "Kill",
       cls: "gtfo-terminal-btn",
+      attr: { title: "Send SIGTERM to the running process" },
     });
     killBtn.addEventListener("click", () => this.plugin.terminalManager.kill());
 
     const clearBtn = toolbar.createEl("button", {
       text: "Clear",
       cls: "gtfo-terminal-btn",
+      attr: { title: "Clear screen and scrollback" },
     });
     clearBtn.addEventListener("click", () => {
       this.terminal?.clear();
@@ -63,31 +75,62 @@ export class TerminalTab {
 
     this.terminalEl = wrapper.createDiv({ cls: "gtfo-terminal" });
 
-    this.initTerminal(this.terminalEl);
+    // Don't init the terminal yet. The container is inside a `display: none`
+    // tab panel right now (we're rendering both tabs eagerly so chat history
+    // survives switches), and xterm.js measures cell sizes from the live DOM
+    // — measuring inside a hidden element returns zeros and produces a
+    // garbage grid. Defer the heavy work to onShow(), which fires the first
+    // time the user actually clicks the Terminal tab.
   }
 
+  /**
+   * Initialize xterm + fit-addon and spawn the shell. Safe to call
+   * multiple times — the second+ calls are no-ops because `initStarted`
+   * latches on the first attempt.
+   */
   private async initTerminal(el: HTMLElement): Promise<void> {
+    if (this.initStarted) return;
+    this.initStarted = true;
+
     try {
       const { Terminal } = await import("@xterm/xterm");
       const { FitAddon } = await import("@xterm/addon-fit");
 
-      const cssColor = (varName: string): string => {
-        const val = getComputedStyle(document.body).getPropertyValue(varName).trim();
-        return val || "#000000";
+      const cssVar = (name: string, fallback: string): string => {
+        const v = getComputedStyle(document.body).getPropertyValue(name).trim();
+        return v || fallback;
       };
+
+      // Prefer Obsidian's own monospace stack so the terminal blends in
+      // with the rest of the UI (and respects the user's font choices in
+      // Appearance settings). Falls back to a sane system stack.
+      const fontFamily = cssVar(
+        "--font-monospace",
+        "ui-monospace, 'SF Mono', Menlo, Monaco, Consolas, 'Courier New', monospace",
+      );
 
       this.terminal = new Terminal({
         fontSize: this.plugin.settings.terminalFontSize,
-        fontFamily: "Menlo, Monaco, 'Courier New', monospace",
+        fontFamily,
         cursorBlink: true,
         cursorStyle: "block",
         scrollback: 10000,
         convertEol: false,
+        // Let scroll-on-output stay on so program output keeps the
+        // viewport pinned to the cursor — feels right for an interactive
+        // shell and prevents claude/vim/etc. from "appearing" off-screen
+        // when their TUI redraws.
+        scrollOnUserInput: true,
+        smoothScrollDuration: 0,
         theme: {
-          background: cssColor("--background-primary") || "#1e1e1e",
-          foreground: cssColor("--text-normal") || "#dcdcdc",
-          cursor: cssColor("--text-accent") || "#ffffff",
-          selectionBackground: cssColor("--text-selection") || "#3a3a3a",
+          background: cssVar("--background-primary", "#1e1e1e"),
+          foreground: cssVar("--text-normal", "#dcdcdc"),
+          cursor: cssVar("--text-accent", "#ffffff"),
+          cursorAccent: cssVar("--background-primary", "#1e1e1e"),
+          selectionBackground: cssVar(
+            "--background-modifier-border-hover",
+            "#3a3a3a",
+          ),
         },
         allowProposedApi: true,
       }) as unknown as XTermTerminal;
@@ -97,17 +140,20 @@ export class TerminalTab {
 
       this.terminal.open(el);
 
-      // Fit BEFORE spawning so the shell starts with correct size.
-      // Otherwise zsh's PROMPT_EOL_MARK fills a line with spaces at the
-      // wrong width, leaving stranded `%` marks after resize.
+      // Two RAFs of slack so xterm's char-measure element gets to the
+      // browser, fonts settle, and our flex layout reaches steady state.
+      // fit() reads cell width/height from the live DOM, so without this
+      // we sometimes computed cols/rows from pre-paint dimensions and the
+      // shell got the wrong size on first prompt.
       await this.waitForLayout(el);
+      await new Promise((r) => requestAnimationFrame(r));
+      await new Promise((r) => requestAnimationFrame(r));
       try {
         this.fitAddon.fit();
       } catch (e) {
         console.error("[GTFO] initial fit failed:", e);
       }
 
-      // Debounced resize for subsequent layout changes
       let resizeTimer: number | null = null;
       this.resizeObserver = new ResizeObserver(() => {
         if (resizeTimer) window.clearTimeout(resizeTimer);
@@ -116,20 +162,18 @@ export class TerminalTab {
             try {
               this.fitAddon.fit();
             } catch {
-              // dimensions may be transiently zero
+              // dimensions may be transiently zero (e.g. mid tab switch)
             }
           }
         }, 100);
       });
       this.resizeObserver.observe(el);
 
-      // Connect UI <-> TerminalManager
       this.wireUpTerminal();
 
       if (!this.plugin.terminalManager.isRunning) {
         this.spawnShell();
       } else {
-        // Reconnecting to an existing shell -- ensure size matches and redraw
         this.plugin.terminalManager.resize(this.terminal.cols, this.terminal.rows);
         this.terminal.write("\r");
       }
@@ -147,7 +191,6 @@ export class TerminalTab {
     if (!this.terminal) return;
     const { terminalManager } = this.plugin;
 
-    // Clear any stale subscriptions
     for (const d of this.disposables) d.dispose();
     this.disposables = [];
 
@@ -182,8 +225,6 @@ export class TerminalTab {
         .getBasePath?.() || ".";
 
     try {
-      // Spawn with the already-fitted dimensions so zsh's first prompt
-      // is drawn at the correct width (no stranded PROMPT_EOL_MARK).
       this.plugin.terminalManager.spawn(
         this.plugin.settings,
         vaultPath,
@@ -219,9 +260,97 @@ export class TerminalTab {
     this.spawnShell();
   }
 
+  /**
+   * Parse `terminalLaunchPresets` (newline-separated `Label = command`
+   * entries) into a structured list. Lines without `=` use the whole
+   * line as both label and command; lines starting with `#` are ignored.
+   */
+  private parseLaunchPresets(): TerminalLaunchPreset[] {
+    const raw = this.plugin.settings.terminalLaunchPresets ?? "";
+    const out: TerminalLaunchPreset[] = [];
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eq = trimmed.indexOf("=");
+      if (eq > 0) {
+        const label = trimmed.slice(0, eq).trim();
+        const command = trimmed.slice(eq + 1).trim();
+        if (label && command) out.push({ label, command });
+      } else {
+        out.push({ label: trimmed, command: trimmed });
+      }
+    }
+    return out;
+  }
+
+  private openLaunchMenu(evt: MouseEvent): void {
+    const presets = this.parseLaunchPresets();
+    const menu = new Menu();
+
+    if (presets.length === 0) {
+      menu.addItem((item) =>
+        item
+          .setTitle("No launch presets configured")
+          .setDisabled(true),
+      );
+    } else {
+      for (const preset of presets) {
+        menu.addItem((item) =>
+          item
+            .setTitle(preset.label)
+            .onClick(() => this.runCommand(preset.command)),
+        );
+      }
+    }
+
+    menu.addSeparator();
+    menu.addItem((item) =>
+      item
+        .setTitle("Edit presets in settings…")
+        .onClick(() => {
+          // Best-effort: open the plugin settings tab. Falls back to a notice.
+          const settingApi = (
+            this.plugin.app as unknown as {
+              setting?: { open?: () => void; openTabById?: (id: string) => void };
+            }
+          ).setting;
+          try {
+            settingApi?.open?.();
+            settingApi?.openTabById?.(this.plugin.manifest.id);
+          } catch {
+            new Notice("Open Settings → GTFO → Terminal to edit presets");
+          }
+        }),
+    );
+
+    menu.showAtMouseEvent(evt);
+  }
+
+  /**
+   * Send a command to the running shell, ending with CR so the shell
+   * runs it. If no shell is running yet, spawn one first.
+   */
+  private async runCommand(command: string): Promise<void> {
+    if (!this.plugin.terminalManager.isRunning) {
+      this.spawnShell();
+      // Give the shell a moment to print its first prompt
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    this.plugin.terminalManager.write(`${command}\r`);
+    this.terminal?.focus();
+  }
+
   onShow(): void {
-    // Called when the terminal tab becomes visible.
-    // Re-fit because the container may have been display:none.
+    // First time we're actually visible: kick off init now (we deferred
+    // it from render() so xterm could measure against a non-hidden DOM).
+    if (!this.initStarted && this.terminalEl) {
+      void this.initTerminal(this.terminalEl);
+      return;
+    }
+
+    // Already initialized — re-fit because the container may have been
+    // display:none while we were on another tab, which can change the
+    // available width/height.
     if (this.fitAddon && this.terminal) {
       setTimeout(() => {
         try {
@@ -246,5 +375,6 @@ export class TerminalTab {
     this.terminal = null;
     this.fitAddon = null;
     this.terminalEl = null;
+    this.initStarted = false;
   }
 }

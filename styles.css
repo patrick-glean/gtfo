@@ -565,25 +565,23 @@
   background: var(--gtfo-hover);
 }
 
+.gtfo-terminal-btn--primary {
+  border-color: var(--gtfo-accent);
+  color: var(--gtfo-accent);
+  font-weight: 600;
+}
+
+.gtfo-terminal-btn--primary:hover {
+  background: var(--gtfo-accent);
+  color: var(--gtfo-accent-text);
+  border-color: var(--gtfo-accent);
+}
+
 .gtfo-terminal {
   flex: 1;
-  padding: 8px;
+  padding: 6px 0 0 6px;
   overflow: hidden;
   background: var(--gtfo-surface-1);
-  position: relative;
-}
-
-.gtfo-terminal .xterm {
-  height: 100%;
-  padding: 0;
-}
-
-.gtfo-terminal .xterm-viewport {
-  overflow-y: auto !important;
-  background: transparent !important;
-}
-
-.gtfo-terminal .xterm-screen {
   position: relative;
 }
 
@@ -595,17 +593,185 @@
   white-space: pre-wrap;
 }
 
-/* Hide xterm's helper textarea and other artifacts that might leak through */
-.gtfo-terminal .xterm-helper-textarea {
-  position: absolute !important;
-  opacity: 0 !important;
-  left: -9999em !important;
-  top: 0 !important;
-  width: 0 !important;
-  height: 0 !important;
-  z-index: -5 !important;
+/* ==========================================================================
+   xterm.js base styles
+   --------------------------------------------------------------------------
+   Inlined from node_modules/@xterm/xterm/css/xterm.css. xterm.js relies on
+   these positioning rules (especially `.xterm-screen canvas { position:
+   absolute }` and `.xterm-viewport { position: absolute; inset: 0 }`) to
+   render its grid correctly. Without them, the canvas elements flow as
+   inline-block and sink to the baseline, which is why our terminal used
+   to show the prompt floating at the bottom of an empty area.
+
+   If you bump @xterm/xterm, refresh this section.
+   ========================================================================== */
+
+.xterm {
+  cursor: text;
+  position: relative;
+  user-select: none;
+  -ms-user-select: none;
+  -webkit-user-select: none;
 }
 
-.gtfo-terminal .xterm .composition-view {
-  display: none !important;
+.xterm.focus,
+.xterm:focus {
+  outline: none;
+}
+
+.xterm .xterm-helpers {
+  position: absolute;
+  top: 0;
+  z-index: 5;
+}
+
+.xterm .xterm-helper-textarea {
+  padding: 0;
+  border: 0;
+  margin: 0;
+  position: absolute;
+  opacity: 0;
+  left: -9999em;
+  top: 0;
+  width: 0;
+  height: 0;
+  z-index: -5;
+  white-space: nowrap;
+  overflow: hidden;
+  resize: none;
+}
+
+.xterm .composition-view {
+  background: #000;
+  color: #FFF;
+  display: none;
+  position: absolute;
+  white-space: nowrap;
+  z-index: 1;
+}
+
+.xterm .composition-view.active {
+  display: block;
+}
+
+.xterm .xterm-viewport {
+  background-color: transparent;
+  overflow-y: auto;
+  cursor: default;
+  position: absolute;
+  right: 0;
+  left: 0;
+  top: 0;
+  bottom: 0;
+}
+
+.xterm .xterm-screen {
+  position: relative;
+}
+
+.xterm .xterm-screen canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+}
+
+.xterm .xterm-scroll-area {
+  visibility: hidden;
+}
+
+.xterm-char-measure-element {
+  display: inline-block;
+  visibility: hidden;
+  position: absolute;
+  top: 0;
+  left: -9999em;
+  line-height: normal;
+}
+
+.xterm.enable-mouse-events {
+  cursor: default;
+}
+
+.xterm.xterm-cursor-pointer,
+.xterm .xterm-cursor-pointer {
+  cursor: pointer;
+}
+
+.xterm.column-select.focus {
+  cursor: crosshair;
+}
+
+.xterm .xterm-accessibility:not(.debug),
+.xterm .xterm-message {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  z-index: 10;
+  color: transparent;
+  pointer-events: none;
+}
+
+.xterm .xterm-accessibility-tree:not(.debug) *::selection {
+  color: transparent;
+}
+
+.xterm .xterm-accessibility-tree {
+  user-select: text;
+  white-space: pre;
+}
+
+.xterm .live-region {
+  position: absolute;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+
+.xterm-dim {
+  opacity: 1 !important;
+}
+
+.xterm-underline-1 { text-decoration: underline; }
+.xterm-underline-2 { text-decoration: double underline; }
+.xterm-underline-3 { text-decoration: wavy underline; }
+.xterm-underline-4 { text-decoration: dotted underline; }
+.xterm-underline-5 { text-decoration: dashed underline; }
+
+.xterm-overline {
+  text-decoration: overline;
+}
+
+.xterm-overline.xterm-underline-1 { text-decoration: overline underline; }
+.xterm-overline.xterm-underline-2 { text-decoration: overline double underline; }
+.xterm-overline.xterm-underline-3 { text-decoration: overline wavy underline; }
+.xterm-overline.xterm-underline-4 { text-decoration: overline dotted underline; }
+.xterm-overline.xterm-underline-5 { text-decoration: overline dashed underline; }
+
+.xterm-strikethrough {
+  text-decoration: line-through;
+}
+
+.xterm-screen .xterm-decoration-container .xterm-decoration {
+  z-index: 6;
+  position: absolute;
+}
+
+.xterm-screen .xterm-decoration-container .xterm-decoration.xterm-decoration-top-layer {
+  z-index: 7;
+}
+
+.xterm-decoration-overview-ruler {
+  z-index: 8;
+  position: absolute;
+  top: 0;
+  right: 0;
+  pointer-events: none;
+}
+
+.xterm-decoration-top {
+  z-index: 2;
+  position: relative;
 }

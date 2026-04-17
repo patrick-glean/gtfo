@@ -8,6 +8,12 @@ export interface GtfoSettings {
   terminalShell: string;
   terminalShellArgs: string;
   terminalFontSize: number;
+  /**
+   * Newline-separated launch presets for the terminal Launch dropdown.
+   * Format per line: `Label = command to run`. Lines without `=` use the
+   * whole line as both label and command. Lines starting with # are ignored.
+   */
+  terminalLaunchPresets: string;
   debugMode: boolean;
   debugFolder: string;
   includeVaultListing: boolean;
@@ -25,12 +31,26 @@ export const DEFAULT_SETTINGS: GtfoSettings = {
   terminalShell: process.env.SHELL || "/bin/zsh",
   terminalShellArgs: "",
   terminalFontSize: 13,
+  terminalLaunchPresets: [
+    "Claude Code = claude",
+    "Cursor agent = cursor-agent",
+    "Codex = codex",
+    "Gemini = gemini",
+    "Vim (this folder) = vim .",
+    "Git status = git status",
+    "List files = ls -la",
+  ].join("\n"),
   debugMode: false,
   debugFolder: "gtfo-debug",
   includeVaultListing: true,
   vaultListingExcludes: "",
   vaultListingMaxChars: 6000,
 };
+
+export interface TerminalLaunchPreset {
+  label: string;
+  command: string;
+}
 
 export interface VaultEntry {
   path: string;

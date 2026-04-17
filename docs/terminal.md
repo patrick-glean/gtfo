@@ -87,11 +87,22 @@ Tab panels are hidden with `display: none` rather than destroyed. When the termi
 
 No PTY reinit, no scrollback loss, no size race.
 
-### Kill / New / Clear
+### Toolbar — Launch / New / Kill / Clear
 
+- **Launch ▾** — opens a dropdown of preset commands (defaults include Claude Code, Cursor agent, Codex, Gemini, Vim, Git status, ls). Picking one writes the command + Enter to the running shell. Spawns a shell first if none is running. Edit the presets in Settings → Terminal → Launch presets (one `Label = command` per line).
 - **New** — kills the current shell and spawns a fresh one at the current dimensions
 - **Kill** — SIGTERM to the shell; leaves the terminal display alone
 - **Clear** — clears the xterm screen AND the scrollback buffer on the manager
+
+### Rendering / xterm.css
+
+The terminal would render incorrectly without xterm.js's base CSS — specifically `.xterm-viewport { position: absolute; inset: 0 }` (so the viewport fills the container) and `.xterm-screen canvas { position: absolute; left: 0; top: 0 }` (so the rendered canvases stack at the top-left instead of flowing as inline-block, which made content sink to the baseline of the container).
+
+Obsidian plugins ship a single `styles.css` that's loaded automatically — there's no convenient way to import xterm's stylesheet at runtime. So we inline xterm's CSS into our `styles.css` under a clearly-marked `/* === xterm.js base styles === */` section. If you bump `@xterm/xterm`, refresh that block from `node_modules/@xterm/xterm/css/xterm.css`.
+
+### Lazy initialization
+
+xterm.js measures cell width/height by inspecting a hidden `.xterm-char-measure-element` in the live DOM. Measuring inside a `display: none` parent returns zeros and produces a garbage grid. We render both Chat and Terminal tabs eagerly (so chat history survives switches), which means the terminal's container starts hidden — so we defer the heavy `Terminal()` + `terminal.open(el)` work until the first `onShow()` call (i.e. the first time the user actually clicks the Terminal tab). Inside init we also wait for two animation frames after `waitForLayout()` resolves, to give fonts and flex layout time to settle before fit-addon reads dimensions.
 
 ### Scrollback buffer
 

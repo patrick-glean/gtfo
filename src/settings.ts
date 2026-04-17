@@ -248,6 +248,27 @@ export class GtfoSettingTab extends PluginSettingTab {
           }),
       );
 
+    new Setting(containerEl)
+      .setName("Launch presets")
+      .setDesc(
+        "One per line. Format: 'Label = command'. Lines without '=' use the whole line as both label and command. Lines starting with # are ignored. Used by the Terminal tab's Launch ▾ dropdown.",
+      )
+      .addTextArea((text) => {
+        text
+          .setPlaceholder(
+            "Claude Code = claude\nVim = vim .\nGit status = git status",
+          )
+          .setValue(this.plugin.settings.terminalLaunchPresets)
+          .onChange(async (value) => {
+            this.plugin.settings.terminalLaunchPresets = value;
+            await this.plugin.saveSettings();
+          });
+        text.inputEl.rows = 8;
+        text.inputEl.style.width = "100%";
+        text.inputEl.style.fontFamily = "monospace";
+        text.inputEl.style.fontSize = "12px";
+      });
+
     // --- Debug ---
     containerEl.createEl("h3", { text: "Debug" });
 

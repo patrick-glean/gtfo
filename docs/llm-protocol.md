@@ -130,6 +130,36 @@ The default is defined in `src/llm/protocol.ts` as `DEFAULT_BOOTSTRAP`. It tells
 - Trigger phrases for `create_note`: "write me a note about...", "create a note...", "save this as a note...", "make a note on..."
 - The action's `content` should be complete standalone note content, separate from the conversational `body`
 
+## Runtime Context
+
+The LLM doesn't know today's date, the local time, or the name of your vault. Without that, when asked to create time-sensitive notes (e.g. "write a note about my 2:30 meeting") it tends to emit Templater-style placeholders like `{{date:YYYY-MM-DD}}` — and those land in your file verbatim because GTFO doesn't run Obsidian's template engine.
+
+To prevent that, `buildRuntimeContext()` is prepended to **every** outgoing chat message (not just the first), so the anchor stays correct even across day boundaries:
+
+```
+(gtfo runtime: today is 2026-04-17 (Friday); local time 15:48 America/Los_Angeles; vault "my-vault". When a note needs a date or time, write the actual value -- never emit template placeholders like {{date}} or {{date:YYYY-MM-DD}}.)
+```
+
+On the first message of a conversation this sits between the bootstrap and the user's turn; on subsequent messages it's prepended to the user's text. It's deliberately parenthetical so the LLM treats it as meta context.
+
+## Template Placeholder Expansion
+
+As a defensive fallback, `expandTemplatePlaceholders()` runs on any LLM-generated content before it hits disk — covering the `create_note` / `edit_note` / `append_note` / `insert_at_cursor` actions, the "Save as Note" button, and "Insert to Note". This catches cases where the LLM ignores the runtime context, or where a user's customized bootstrap stripped it out.
+
+Supported placeholders:
+
+| Placeholder | Expansion |
+|-------------|-----------|
+| `{{date}}` | Today, default format `YYYY-MM-DD` |
+| `{{date:FORMAT}}` | Today formatted with `FORMAT` |
+| `{{time}}` | Now, default format `HH:mm` |
+| `{{time:FORMAT}}` | Now formatted with `FORMAT` |
+| `{{title}}` | Filename of the target note (no `.md`) |
+
+Supported format tokens (moment.js-compatible subset): `YYYY`, `YY`, `MMMM`, `MMM`, `MM`, `M`, `DD`, `D`, `dddd`, `ddd`, `HH`, `H`, `mm`, `m`, `ss`, `s`. Unknown tokens pass through unchanged.
+
+Any other `{{...}}` expression (e.g. full Templater syntax like `<% tp.date.now() %>`) is **not** touched — it stays visible so you can notice and fix the prompt, rather than being silently dropped.
+
 ## Parser
 
 `parseLlmResponse` in `src/llm/protocol.ts` parses the response with multiple strategies, in order:

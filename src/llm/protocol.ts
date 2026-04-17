@@ -59,6 +59,128 @@ For pure Q&A with no vault operation requested, omit the actions array.
 ALWAYS respond with valid JSON only.`;
 
 /**
+ * Build a short "runtime context" block that gets prepended to every
+ * outgoing chat message. The LLM doesn't know today's date, the local
+ * time, or the vault name on its own — without this, it tends to emit
+ * Templater-style placeholders like `{{date:YYYY-MM-DD}}` when asked
+ * to create time-sensitive notes, and those placeholders get written
+ * to disk verbatim (we don't expand templates).
+ *
+ * Kept deliberately small and parenthetical so the LLM treats it as
+ * meta context, not as part of the user's turn.
+ */
+export function buildRuntimeContext(
+  opts: { vaultName?: string; now?: Date } = {},
+): string {
+  const now = opts.now ?? new Date();
+  const date = formatDate(now, "YYYY-MM-DD");
+  const day = formatDate(now, "dddd");
+  const time = formatDate(now, "HH:mm");
+  let tz = "";
+  try {
+    tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  } catch {
+    // some environments don't expose this -- ignore
+  }
+  const parts = [
+    `today is ${date} (${day})`,
+    `local time ${time}${tz ? ` ${tz}` : ""}`,
+  ];
+  if (opts.vaultName) parts.push(`vault "${opts.vaultName}"`);
+  return (
+    `(gtfo runtime: ${parts.join("; ")}. ` +
+    `When a note needs a date or time, write the actual value -- ` +
+    `never emit template placeholders like {{date}} or {{date:YYYY-MM-DD}}.)`
+  );
+}
+
+/**
+ * Minimal moment.js-compatible date formatter. Supports the tokens the
+ * LLM is most likely to emit: YYYY, YY, MMMM, MMM, MM, M, DD, D, dddd,
+ * ddd, HH, H, mm, m, ss, s. Unknown tokens pass through unchanged.
+ *
+ * The regex alternation is ordered longest-first so e.g. `MMMM` wins
+ * over `MM` and `M`.
+ */
+export function formatDate(d: Date, format: string): string {
+  return format.replace(
+    /YYYY|YY|MMMM|MMM|MM|M|DD|D|dddd|ddd|HH|H|mm|m|ss|s/g,
+    (token) => {
+      switch (token) {
+        case "YYYY":
+          return String(d.getFullYear());
+        case "YY":
+          return String(d.getFullYear()).slice(-2);
+        case "MMMM":
+          return d.toLocaleString("en-US", { month: "long" });
+        case "MMM":
+          return d.toLocaleString("en-US", { month: "short" });
+        case "MM":
+          return String(d.getMonth() + 1).padStart(2, "0");
+        case "M":
+          return String(d.getMonth() + 1);
+        case "DD":
+          return String(d.getDate()).padStart(2, "0");
+        case "D":
+          return String(d.getDate());
+        case "dddd":
+          return d.toLocaleString("en-US", { weekday: "long" });
+        case "ddd":
+          return d.toLocaleString("en-US", { weekday: "short" });
+        case "HH":
+          return String(d.getHours()).padStart(2, "0");
+        case "H":
+          return String(d.getHours());
+        case "mm":
+          return String(d.getMinutes()).padStart(2, "0");
+        case "m":
+          return String(d.getMinutes());
+        case "ss":
+          return String(d.getSeconds()).padStart(2, "0");
+        case "s":
+          return String(d.getSeconds());
+        default:
+          return token;
+      }
+    },
+  );
+}
+
+/**
+ * Expand the common Obsidian/Templater-style placeholders the LLM tends
+ * to emit in note content, as a defensive fallback for when the runtime
+ * context in the bootstrap wasn't enough to stop it.
+ *
+ * Handles: {{date}}, {{date:FORMAT}}, {{time}}, {{time:FORMAT}}, {{title}}.
+ * Other `{{...}}` expressions are left untouched so they stay visible and
+ * inspectable rather than being silently dropped.
+ */
+export function expandTemplatePlaceholders(
+  text: string,
+  ctx: { title?: string; now?: Date } = {},
+): string {
+  if (!text) return text;
+  const now = ctx.now ?? new Date();
+  return text
+    .replace(/\{\{\s*date(?:\s*:\s*([^}]+?))?\s*\}\}/g, (_m, fmt) =>
+      formatDate(now, (fmt ?? "YYYY-MM-DD").trim()),
+    )
+    .replace(/\{\{\s*time(?:\s*:\s*([^}]+?))?\s*\}\}/g, (_m, fmt) =>
+      formatDate(now, (fmt ?? "HH:mm").trim()),
+    )
+    .replace(/\{\{\s*title\s*\}\}/g, ctx.title ?? "");
+}
+
+/**
+ * Derive a note title from a vault path: strip directories and the .md
+ * extension. Used to fill `{{title}}` placeholders for create_note etc.
+ */
+export function titleFromPath(path: string): string {
+  const base = path.split("/").pop() ?? path;
+  return base.replace(/\.md$/i, "");
+}
+
+/**
  * Parse an LLM response string into a structured LlmResponse.
  * Handles both raw JSON and JSON embedded in markdown code blocks.
  */

@@ -65,6 +65,12 @@ export default class GtfoPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "gtfo-new-chat",
+      name: "New chat",
+      callback: () => this.newChat(),
+    });
+
+    this.addCommand({
       id: "gtfo-connect",
       name: "Connect to Glean",
       callback: () => this.connectToGlean(),
@@ -195,6 +201,15 @@ export default class GtfoPlugin extends Plugin {
     }
 
     workspace.revealLeaf(leaf);
+  }
+
+  async newChat(): Promise<void> {
+    await this.activateView();
+    const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_GTFO);
+    for (const leaf of leaves) {
+      const view = leaf.view as GtfoSidebarView;
+      view.newChat?.();
+    }
   }
 
   async loadSettings(): Promise<void> {

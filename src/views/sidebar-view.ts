@@ -113,4 +113,9 @@ export class GtfoSidebarView extends ItemView {
     if (tabId === "terminal") this.terminalTab?.onShow();
     if (tabId === "chat") this.chatTab?.onShow();
   }
+
+  newChat(): void {
+    this.setActiveTab("chat");
+    this.chatTab?.newChat();
+  }
 }

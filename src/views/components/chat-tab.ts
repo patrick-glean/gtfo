@@ -4,6 +4,9 @@ import type { ChatMessage, ChatMetrics, GleanSearchResult } from "../../types";
 import {
   parseLlmResponse,
   DEFAULT_BOOTSTRAP,
+  buildRuntimeContext,
+  expandTemplatePlaceholders,
+  titleFromPath,
   type LlmAction,
 } from "../../llm/protocol";
 
@@ -26,18 +29,16 @@ export class ChatTab {
   render(): void {
     const wrapper = this.container.createDiv({ cls: "gtfo-chat-wrapper" });
 
-    this.messagesEl = wrapper.createDiv({ cls: "gtfo-chat-messages" });
+    const toolbar = wrapper.createDiv({ cls: "gtfo-chat-toolbar" });
+    const newChatBtn = toolbar.createEl("button", {
+      text: "New chat",
+      cls: "gtfo-chat-toolbar-btn",
+      attr: { title: "Start a fresh conversation (clears history and resets chatId)" },
+    });
+    newChatBtn.addEventListener("click", () => this.newChat());
 
-    if (this.messages.length === 0) {
-      this.messagesEl.createDiv({
-        cls: "gtfo-chat-placeholder",
-        text: this.plugin.mcpClient.connected
-          ? "Ask Glean anything about your organization..."
-          : "Connect to Glean in Settings to start chatting.",
-      });
-    } else {
-      this.renderMessages();
-    }
+    this.messagesEl = wrapper.createDiv({ cls: "gtfo-chat-messages" });
+    this.renderMessages();
 
     const inputContainer = wrapper.createDiv({
       cls: "gtfo-chat-input-container",
@@ -82,6 +83,26 @@ export class ChatTab {
   onShow(): void {
     this.inputEl?.focus();
     this.scrollToBottom();
+  }
+
+  /**
+   * Reset the conversation: drop in-memory messages and clear the Glean
+   * chatId so the next send starts a fresh conversation (and re-sends the
+   * bootstrap text). The Glean-side chat isn't explicitly ended — we just
+   * stop referencing it, which is the same behavior as "new chat" in
+   * other clients.
+   */
+  newChat(): void {
+    if (this.messages.length === 0 && this.chatId === undefined) {
+      this.inputEl?.focus();
+      return;
+    }
+    this.messages = [];
+    this.chatId = undefined;
+    if (this.inputEl) this.inputEl.value = "";
+    this.renderMessages();
+    this.updateHint();
+    this.inputEl?.focus();
   }
 
   private async sendMessage(mode: MessageMode): Promise<void> {
@@ -151,9 +172,16 @@ export class ChatTab {
       } else {
         const bootstrap =
           this.plugin.settings.bootstrapText || DEFAULT_BOOTSTRAP;
+        // Runtime context (date/time/vault) is injected on EVERY turn,
+        // not just the first. The bootstrap gives the LLM its persona
+        // and protocol once; the runtime block keeps it anchored to
+        // real time on every send, even across day boundaries.
+        const runtime = buildRuntimeContext({
+          vaultName: this.plugin.app.vault.getName(),
+        });
         const fullMessage = this.chatId
-          ? text
-          : `${bootstrap}\n\n---\n\nUser: ${text}`;
+          ? `${runtime}\n\n${text}`
+          : `${bootstrap}\n\n${runtime}\n\n---\n\nUser: ${text}`;
 
         const response = await this.plugin.mcpClient.chat(
           fullMessage,
@@ -311,6 +339,16 @@ export class ChatTab {
     if (!this.messagesEl) return;
     this.messagesEl.empty();
 
+    if (this.messages.length === 0) {
+      this.messagesEl.createDiv({
+        cls: "gtfo-chat-placeholder",
+        text: this.plugin.mcpClient.connected
+          ? "Ask Glean anything about your organization..."
+          : "Connect to Glean in Settings to start chatting.",
+      });
+      return;
+    }
+
     for (const msg of this.messages) {
       if (msg.role === "user") {
         this.renderUserMessage(msg);
@@ -415,9 +453,12 @@ export class ChatTab {
         .replace(/(^-|-$)/g, "");
       const path = `glean/${slug}.md`;
       const frontmatter = `---\nsource: glean\ndate: ${new Date().toISOString().split("T")[0]}\n---\n\n`;
+      const expandedBody = expandTemplatePlaceholders(bodyText, {
+        title: titleFromPath(path),
+      });
       await this.plugin.vaultTools.createNote(
         path,
-        `${frontmatter}# ${title}\n\n${bodyText}`,
+        `${frontmatter}# ${title}\n\n${expandedBody}`,
       );
       new Notice(`Saved: ${path}`);
     });
@@ -426,7 +467,9 @@ export class ChatTab {
       text: "Insert to Note",
       cls: "gtfo-result-btn",
     });
-    insertBtn.addEventListener("click", () => this.insertToNote(bodyText));
+    insertBtn.addEventListener("click", () =>
+      this.insertToNote(expandTemplatePlaceholders(bodyText)),
+    );
 
     const copyBtn = actions.createEl("button", {
       text: "Copy",
@@ -462,29 +505,39 @@ export class ChatTab {
   private async executeAction(action: LlmAction): Promise<void> {
     const { vaultTools, gateway } = this.plugin;
 
+    // Defensive fallback: LLMs sometimes emit {{date}} / {{time}} / {{title}}
+    // placeholders in note content even with runtime context in the bootstrap.
+    // We don't run Obsidian's template engine over LLM output, so anything
+    // not expanded here ends up in the file verbatim.
+    const title = action.path ? titleFromPath(action.path) : undefined;
+    const content =
+      action.content !== undefined
+        ? expandTemplatePlaceholders(action.content, { title })
+        : undefined;
+
     try {
       switch (action.type) {
         case "create_note":
-          if (action.path && action.content) {
-            await vaultTools.createNote(action.path, action.content);
+          if (action.path && content) {
+            await vaultTools.createNote(action.path, content);
             new Notice(`Created: ${action.path}`);
           }
           break;
         case "edit_note":
-          if (action.path && action.content) {
-            await vaultTools.editNote(action.path, action.content);
+          if (action.path && content) {
+            await vaultTools.editNote(action.path, content);
             new Notice(`Updated: ${action.path}`);
           }
           break;
         case "append_note":
-          if (action.path && action.content) {
-            await vaultTools.appendToNote(action.path, action.content);
+          if (action.path && content) {
+            await vaultTools.appendToNote(action.path, content);
             new Notice(`Appended to: ${action.path}`);
           }
           break;
         case "insert_at_cursor":
-          if (action.content) {
-            const ok = await vaultTools.insertAtCursor(action.content);
+          if (content) {
+            const ok = await vaultTools.insertAtCursor(content);
             new Notice(ok ? "Inserted at cursor" : "No active editor");
           }
           break;

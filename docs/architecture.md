@@ -97,6 +97,21 @@ User types, presses Opt+Enter
   → Metrics shown (req_ms, tokens, bytes)
 ```
 
+### New chat
+
+```
+User clicks "New chat" (toolbar) or runs the
+"GTFO: New chat" command
+  → ChatTab.newChat()
+  → messages = []
+  → chatId = undefined
+  → Input cleared, placeholder re-rendered
+  → Next send re-prepends bootstrap text and
+    starts a fresh Glean chat conversation
+```
+
+The Glean-side chat isn't explicitly ended — dropping the `chatId` is enough for the next send to start a new conversation server-side.
+
 ### LLM action execution
 
 ```

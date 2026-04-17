@@ -1,18 +1,20 @@
 import { MarkdownRenderer, Notice } from "obsidian";
 import type GtfoPlugin from "../../main";
-import type { ChatMessage } from "../../types";
+import type { ChatMessage, ChatMetrics, GleanSearchResult } from "../../types";
 import {
   parseLlmResponse,
   DEFAULT_BOOTSTRAP,
-  type LlmResponse,
   type LlmAction,
 } from "../../llm/protocol";
+
+type MessageMode = "chat" | "search";
 
 export class ChatTab {
   private container: HTMLElement;
   private plugin: GtfoPlugin;
   private messagesEl: HTMLElement | null = null;
   private inputEl: HTMLTextAreaElement | null = null;
+  private hintEl: HTMLElement | null = null;
   private messages: ChatMessage[] = [];
   private chatId: string | undefined;
 
@@ -42,25 +44,47 @@ export class ChatTab {
     });
 
     this.inputEl = inputContainer.createEl("textarea", {
-      placeholder: "Ask Glean...",
+      placeholder: "Ask Glean...   (Opt+Enter to search)",
       cls: "gtfo-chat-input",
     });
 
     this.inputEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        this.sendMessage();
+        const mode: MessageMode = e.altKey ? "search" : "chat";
+        this.sendMessage(mode);
       }
     });
+
+    this.inputEl.addEventListener("keyup", () => this.updateHint());
+    this.inputEl.addEventListener("focus", () => this.updateHint());
 
     const sendBtn = inputContainer.createEl("button", {
       text: "Send",
       cls: "gtfo-chat-send-btn",
     });
-    sendBtn.addEventListener("click", () => this.sendMessage());
+    sendBtn.addEventListener("click", () => this.sendMessage("chat"));
+
+    this.hintEl = wrapper.createDiv({ cls: "gtfo-chat-hint" });
+    this.updateHint();
   }
 
-  private async sendMessage(): Promise<void> {
+  private updateHint(): void {
+    if (!this.hintEl) return;
+    const hasText = !!this.inputEl?.value?.trim();
+    if (hasText) {
+      this.hintEl.setText("Enter → Chat  ·  Opt+Enter → Search  ·  Shift+Enter → newline");
+    } else {
+      this.hintEl.setText("");
+    }
+  }
+
+  onShow(): void {
+    this.inputEl?.focus();
+    this.scrollToBottom();
+  }
+
+  private async sendMessage(mode: MessageMode): Promise<void> {
     const text = this.inputEl?.value?.trim();
     if (!text) return;
 
@@ -71,55 +95,216 @@ export class ChatTab {
 
     const userMsg: ChatMessage = {
       role: "user",
-      content: text,
+      content: mode === "search" ? `🔍 ${text}` : text,
       timestamp: Date.now(),
     };
     this.messages.push(userMsg);
 
     if (this.inputEl) this.inputEl.value = "";
+    this.updateHint();
 
     this.renderMessages();
     this.scrollToBottom();
 
+    // Show a loading indicator
+    const loadingMsg: ChatMessage = {
+      role: "assistant",
+      content: "__LOADING__",
+      timestamp: Date.now(),
+    };
+    this.messages.push(loadingMsg);
+    this.renderMessages();
+    this.scrollToBottom();
+
+    const t0 = performance.now();
+    const debug = this.plugin.settings.debugMode;
+
     try {
-      const bootstrap =
-        this.plugin.settings.bootstrapText || DEFAULT_BOOTSTRAP;
-      const fullMessage = this.chatId
-        ? text
-        : `${bootstrap}\n\n---\n\nUser: ${text}`;
+      if (mode === "search") {
+        const response = await this.plugin.mcpClient.search(text);
+        const reqMs = Math.round(performance.now() - t0);
+        const results = this.parseSearchResults(response);
+        const content = this.formatSearchResults(text, results);
+        const bytes = this.responseBytes(response);
 
-      const response = await this.plugin.mcpClient.chat(
-        fullMessage,
-        this.chatId,
-      );
-      const rawContent = this.extractRawContent(response);
+        this.messages.pop();
+        this.messages.push({
+          role: "assistant",
+          content,
+          timestamp: Date.now(),
+          metrics: {
+            mode: "search",
+            reqMs,
+            tokens: estimateTokens(content),
+            bytes,
+          },
+        });
+        this.renderMessages();
+        this.scrollToBottom();
 
-      // Try to extract chatId for conversation continuity
-      this.extractChatId(response);
+        if (debug) {
+          this.writeDebugLog(
+            { mode: "search", tool: "search", prompt: text, args: { query: text } },
+            { reqMs, response, extractedContent: content },
+          );
+        }
+      } else {
+        const bootstrap =
+          this.plugin.settings.bootstrapText || DEFAULT_BOOTSTRAP;
+        const fullMessage = this.chatId
+          ? text
+          : `${bootstrap}\n\n---\n\nUser: ${text}`;
 
-      const parsed = parseLlmResponse(rawContent);
+        const response = await this.plugin.mcpClient.chat(
+          fullMessage,
+          this.chatId,
+        );
+        const reqMs = Math.round(performance.now() - t0);
+        const rawContent = this.extractRawContent(response);
+        this.extractChatId(response);
+        const bytes = this.responseBytes(response);
 
-      const assistantMsg: ChatMessage = {
-        role: "assistant",
-        content: rawContent,
-        timestamp: Date.now(),
-      };
-      this.messages.push(assistantMsg);
-      this.renderMessages();
-      this.scrollToBottom();
+        const parsed = parseLlmResponse(rawContent);
 
-      if (parsed?.actions && parsed.actions.length > 0) {
-        this.handleActions(parsed.actions);
+        this.messages.pop();
+        this.messages.push({
+          role: "assistant",
+          content: rawContent,
+          timestamp: Date.now(),
+          metrics: {
+            mode: "chat",
+            reqMs,
+            tokens: estimateTokens(rawContent),
+            bytes,
+          },
+        });
+        this.renderMessages();
+        this.scrollToBottom();
+
+        if (parsed?.actions && parsed.actions.length > 0) {
+          this.handleActions(parsed.actions);
+        }
+
+        if (debug) {
+          this.writeDebugLog(
+            {
+              mode: "chat",
+              tool: "chat",
+              prompt: text,
+              args: { message: fullMessage, chatId: this.chatId },
+              chatId: this.chatId,
+            },
+            {
+              reqMs,
+              response,
+              extractedContent: rawContent,
+              parsedLlmResponse: parsed,
+            },
+          );
+        }
       }
     } catch (e) {
-      const errorMsg: ChatMessage = {
+      const reqMs = Math.round(performance.now() - t0);
+      this.messages.pop(); // remove loading
+      this.messages.push({
         role: "assistant",
         content: `Error: ${e}`,
         timestamp: Date.now(),
-      };
-      this.messages.push(errorMsg);
+      });
       this.renderMessages();
+
+      if (debug) {
+        this.writeDebugLog(
+          { mode, prompt: text },
+          { reqMs, response: null, error: String(e) },
+        );
+      }
     }
+  }
+
+  private async writeDebugLog(
+    request: Parameters<typeof this.plugin.debugLogger.log>[0],
+    result: Parameters<typeof this.plugin.debugLogger.log>[1],
+  ): Promise<void> {
+    try {
+      const path = await this.plugin.debugLogger.log(
+        request,
+        result,
+        this.plugin.settings.debugFolder,
+      );
+      if (path) {
+        new Notice(`Debug log: ${path}`, 2000);
+      }
+    } catch (e) {
+      console.error("[GTFO] debug log failed:", e);
+    }
+  }
+
+  private responseBytes(response: unknown): number {
+    try {
+      return new Blob([JSON.stringify(response)]).size;
+    } catch {
+      return 0;
+    }
+  }
+
+  private parseSearchResults(response: unknown): GleanSearchResult[] {
+    if (!response || typeof response !== "object") return [];
+    const resp = response as { content?: { type: string; text: string }[] };
+    if (!resp.content) return [];
+    const textContent = resp.content.find((c) => c.type === "text");
+    if (!textContent) return [];
+    try {
+      const parsed = JSON.parse(textContent.text);
+      const items = Array.isArray(parsed) ? parsed : parsed.results || [];
+      return items.map((r: Record<string, string>) => ({
+        title: r.title || "Untitled",
+        url: r.url || "",
+        snippet: r.snippet || r.description || "",
+        source: r.source || r.datasource || "",
+        lastUpdated: r.lastUpdated || undefined,
+      }));
+    } catch {
+      return [
+        {
+          title: "Results",
+          url: "",
+          snippet: textContent.text,
+          source: "Glean",
+        },
+      ];
+    }
+  }
+
+  private formatSearchResults(
+    query: string,
+    results: GleanSearchResult[],
+  ): string {
+    if (results.length === 0) {
+      return JSON.stringify({
+        llmresponse: {
+          title: `No results for "${query}"`,
+          body: "Try a different query.",
+        },
+      });
+    }
+    const body = results
+      .slice(0, 10)
+      .map((r) => {
+        const parts = [];
+        if (r.url) parts.push(`- **[${r.title}](${r.url})**`);
+        else parts.push(`- **${r.title}**`);
+        if (r.source) parts[0] += ` · *${r.source}*`;
+        if (r.snippet) parts.push(`  ${r.snippet}`);
+        return parts.join("\n");
+      })
+      .join("\n\n");
+    return JSON.stringify({
+      llmresponse: {
+        title: `Search: "${query}" (${results.length} result${results.length === 1 ? "" : "s"})`,
+        body,
+      },
+    });
   }
 
   private renderMessages(): void {
@@ -129,10 +314,20 @@ export class ChatTab {
     for (const msg of this.messages) {
       if (msg.role === "user") {
         this.renderUserMessage(msg);
+      } else if (msg.content === "__LOADING__") {
+        this.renderLoading();
       } else {
         this.renderAssistantMessage(msg);
       }
     }
+  }
+
+  private renderLoading(): void {
+    const msgEl = this.messagesEl!.createDiv({
+      cls: "gtfo-chat-message gtfo-chat-message--assistant gtfo-chat-message--loading",
+    });
+    const dots = msgEl.createDiv({ cls: "gtfo-typing-indicator" });
+    for (let i = 0; i < 3; i++) dots.createSpan({ cls: "gtfo-typing-dot" });
   }
 
   private renderUserMessage(msg: ChatMessage): void {
@@ -154,7 +349,14 @@ export class ChatTab {
     });
 
     const header = msgEl.createDiv({ cls: "gtfo-chat-message-role" });
-    header.createSpan({ text: "Glean" });
+    const roleLabel = msg.metrics?.mode === "search" ? "Search" : "Glean";
+    header.createSpan({ text: roleLabel });
+    if (msg.metrics) {
+      header.createSpan({
+        cls: "gtfo-chat-metrics",
+        text: formatMetrics(msg.metrics),
+      });
+    }
 
     if (parsed && parsed.title !== "Response") {
       msgEl.createDiv({
@@ -339,43 +541,34 @@ export class ChatTab {
 
   private extractRawContent(response: unknown): string {
     if (!response || typeof response !== "object") {
-      console.log("[GTFO] chat response is not an object:", response);
       return String(response ?? "No response");
     }
 
-    console.log("[GTFO] chat response:", JSON.stringify(response).substring(0, 500));
-
     const resp = response as Record<string, unknown>;
 
+    // Glean chat API structure (structured): { messages: [{ fragments: [{ text: "..." }] }] }
+    if (Array.isArray(resp.messages)) {
+      const text = extractFromMessages(resp.messages);
+      if (text) return text;
+    }
+
     // MCP tool response: { content: [{ type: "text", text: "..." }] }
+    // Glean's chat MCP server returns the chat API response serialized as YAML.
     if (Array.isArray(resp.content)) {
       const textParts = (resp.content as { type: string; text: string }[])
         .filter((c) => c.type === "text")
         .map((c) => c.text);
-      if (textParts.length > 0) return textParts.join("\n");
-    }
-
-    // Glean chat API structure: { messages: [{ fragments: [{ text: "..." }] }] }
-    if (Array.isArray(resp.messages)) {
-      const msgs = resp.messages as {
-        author?: string;
-        fragments?: { text?: string }[];
-      }[];
-      const aiMsg = msgs.find(
-        (m) => m.author === "GLEAN_AI" || m.author === "ASSISTANT",
-      ) || msgs[msgs.length - 1];
-      if (aiMsg?.fragments) {
-        const texts = aiMsg.fragments
-          .map((f) => f.text)
-          .filter((t): t is string => !!t);
-        if (texts.length > 0) return texts.join("\n");
+      const raw = textParts.join("\n");
+      if (raw) {
+        // Try extracting the inner llmresponse JSON from the YAML dump
+        const extracted = extractLlmJsonFromText(raw);
+        if (extracted) return extracted;
+        return raw;
       }
     }
 
-    // Direct text field
     if (typeof resp.text === "string") return resp.text;
 
-    // Last resort: stringify
     return JSON.stringify(response, null, 2);
   }
 
@@ -388,21 +581,142 @@ export class ChatTab {
       return;
     }
 
-    // May be nested in MCP content
     if (Array.isArray(resp.content)) {
       for (const item of resp.content as { type: string; text: string }[]) {
         if (item.type === "text") {
-          try {
-            const parsed = JSON.parse(item.text);
-            if (parsed.chatId) {
-              this.chatId = parsed.chatId;
-              return;
-            }
-          } catch {
-            // not JSON
+          // Look for chatId in the YAML/JSON text
+          const match = item.text.match(/chatId:\s*([a-f0-9]+)/i);
+          if (match) {
+            this.chatId = match[1];
+            return;
           }
         }
       }
     }
   }
+}
+
+// ------- Helpers -------
+
+function estimateTokens(text: string): number {
+  // Rough heuristic: ~4 chars per token for English
+  if (!text) return 0;
+  return Math.max(1, Math.round(text.length / 4));
+}
+
+function formatMetrics(m: ChatMetrics): string {
+  const parts: string[] = [];
+  parts.push(`req ${formatMs(m.reqMs)}`);
+  if (m.tokens) parts.push(`${formatNum(m.tokens)} tok`);
+  if (m.bytes) parts.push(formatBytes(m.bytes));
+  return parts.join(" · ");
+}
+
+function formatMs(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(2)}s`;
+}
+
+function formatNum(n: number): string {
+  return n.toLocaleString();
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+function extractFromMessages(
+  messages: { author?: string; fragments?: { text?: string }[] }[],
+): string | null {
+  const aiMsg =
+    messages.find(
+      (m) => m.author === "GLEAN_AI" || m.author === "ASSISTANT",
+    ) || messages[messages.length - 1];
+  if (!aiMsg?.fragments) return null;
+  const texts = aiMsg.fragments.map((f) => f.text).filter((t): t is string => !!t);
+  return texts.length > 0 ? texts.join("\n") : null;
+}
+
+/**
+ * Extract the llmresponse JSON from text that may be:
+ *  - Raw JSON already
+ *  - YAML with an embedded JSON string value
+ *  - Markdown with a JSON code block
+ */
+function extractLlmJsonFromText(text: string): string | null {
+  // 1. Maybe it's already raw JSON
+  const directJson = findBalancedLlmJson(text);
+  if (directJson) return directJson;
+
+  // 2. YAML string value containing escaped JSON (Glean MCP shape):
+  //    fragments[N]{text}:\n      "{\n  \"llmresponse\": ...}"
+  const yamlPatterns = [
+    /fragments\[\d+\]\{text\}:\s*\r?\n?\s*"((?:\\.|[^"\\])*)"/,
+    /\btext:\s*\r?\n?\s*"((?:\\.|[^"\\])*)"/,
+  ];
+  for (const pattern of yamlPatterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) {
+      try {
+        const decoded = JSON.parse('"' + match[1] + '"');
+        const inner = findBalancedLlmJson(decoded);
+        if (inner) return inner;
+        if (decoded.includes("llmresponse")) return decoded;
+      } catch {
+        // fall through
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Scan the text for a `{...}` region containing `"llmresponse"` with balanced
+ * braces, respecting string escaping.
+ */
+function findBalancedLlmJson(text: string): string | null {
+  const idx = text.indexOf('"llmresponse"');
+  if (idx < 0) return null;
+
+  // Walk backwards to the opening `{` before the key
+  let start = idx;
+  while (start > 0 && text[start] !== "{") start--;
+  if (text[start] !== "{") return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        const candidate = text.substring(start, i + 1);
+        try {
+          JSON.parse(candidate);
+          return candidate;
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
 }

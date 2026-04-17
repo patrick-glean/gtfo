@@ -171,6 +171,21 @@ export class GtfoSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Shell args")
+      .setDesc(
+        "Arguments passed to the shell. Use '-l' for login shell, '-f' to skip rc files (helpful if your zshrc emits escape sequences).",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("e.g. -l  or  -f")
+          .setValue(this.plugin.settings.terminalShellArgs)
+          .onChange(async (value) => {
+            this.plugin.settings.terminalShellArgs = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
       .setName("Font size")
       .setDesc("Terminal font size in pixels")
       .addSlider((slider) =>
@@ -180,6 +195,36 @@ export class GtfoSettingTab extends PluginSettingTab {
           .setDynamicTooltip()
           .onChange(async (value) => {
             this.plugin.settings.terminalFontSize = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    // --- Debug ---
+    containerEl.createEl("h3", { text: "Debug" });
+
+    new Setting(containerEl)
+      .setName("Debug mode")
+      .setDesc(
+        "When enabled, every Glean request writes a debug note to your vault with the full request/response, response shape, and timing.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.debugMode)
+          .onChange(async (value) => {
+            this.plugin.settings.debugMode = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Debug folder")
+      .setDesc("Vault folder where debug notes are written")
+      .addText((text) =>
+        text
+          .setPlaceholder("gtfo-debug")
+          .setValue(this.plugin.settings.debugFolder)
+          .onChange(async (value) => {
+            this.plugin.settings.debugFolder = value || "gtfo-debug";
             await this.plugin.saveSettings();
           }),
       );

@@ -6,7 +6,10 @@ export interface GtfoSettings {
   executionMode: "autonomous" | "plan-confirm" | "step-by-step";
   bootstrapText: string;
   terminalShell: string;
+  terminalShellArgs: string;
   terminalFontSize: number;
+  debugMode: boolean;
+  debugFolder: string;
 }
 
 export const DEFAULT_SETTINGS: GtfoSettings = {
@@ -17,7 +20,10 @@ export const DEFAULT_SETTINGS: GtfoSettings = {
   executionMode: "plan-confirm",
   bootstrapText: "",
   terminalShell: process.env.SHELL || "/bin/zsh",
+  terminalShellArgs: "",
   terminalFontSize: 13,
+  debugMode: false,
+  debugFolder: "gtfo-debug",
 };
 
 export interface GleanSearchResult {
@@ -33,6 +39,14 @@ export interface ChatMessage {
   content: string;
   timestamp: number;
   citations?: Citation[];
+  metrics?: ChatMetrics;
+}
+
+export interface ChatMetrics {
+  mode: "chat" | "search";
+  reqMs: number;
+  tokens?: number;
+  bytes?: number;
 }
 
 export interface Citation {

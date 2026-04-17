@@ -19,6 +19,8 @@ type NodePtyModule = {
   ) => IPty;
 };
 
+const MAX_BUFFER_BYTES = 200_000; // ~200KB scrollback buffer
+
 export class TerminalManager {
   private pty: IPty | null = null;
   private fallbackProc: ChildProcess | null = null;
@@ -28,9 +30,27 @@ export class TerminalManager {
   private pluginDir: string | null = null;
   private dataCallbacks: ((data: string) => void)[] = [];
   private exitCallbacks: ((code: number) => void)[] = [];
+  private scrollback = "";
+  private lastCols = 0;
+  private lastRows = 0;
+
+  // Debug state
+  private debugMode = false;
+  private debugLogPath: string | null = null;
+  private debugAppend: ((line: string) => void) | null = null;
 
   setPluginDir(dir: string): void {
     this.pluginDir = dir;
+  }
+
+  setDebug(
+    enabled: boolean,
+    appender?: (line: string) => void,
+    logPath?: string,
+  ): void {
+    this.debugMode = enabled;
+    this.debugAppend = appender ?? null;
+    this.debugLogPath = logPath ?? null;
   }
 
   get isRunning(): boolean {
@@ -92,36 +112,68 @@ export class TerminalManager {
     return null;
   }
 
-  spawn(settings: GtfoSettings, cwd: string): void {
+  spawn(
+    settings: GtfoSettings,
+    cwd: string,
+    cols = 80,
+    rows = 24,
+  ): void {
     this.kill();
+    this.scrollback = "";
 
     const ptyModule = this.tryLoadNodePty();
 
+    // Cache the initial size so future resize() calls don't no-op
+    this.lastCols = cols;
+    this.lastRows = rows;
+
+    this.logDebug(
+      `\n=== shell spawn @ ${new Date().toISOString()} ===\n` +
+        `shell: ${settings.terminalShell}\n` +
+        `args:  ${JSON.stringify(parseShellArgs(settings))}\n` +
+        `cwd:   ${cwd}\n` +
+        `size:  ${cols}x${rows}\n` +
+        `transport: ${ptyModule ? "node-pty" : "child_process"}\n`,
+    );
+
     if (ptyModule) {
-      this.spawnPty(ptyModule, settings, cwd);
+      this.spawnPty(ptyModule, settings, cwd, cols, rows);
     } else {
       this.spawnFallback(settings, cwd);
     }
   }
 
-  private spawnPty(ptyModule: NodePtyModule, settings: GtfoSettings, cwd: string): void {
-    this.pty = ptyModule.spawn(settings.terminalShell, [], {
+  private spawnPty(
+    ptyModule: NodePtyModule,
+    settings: GtfoSettings,
+    cwd: string,
+    cols: number,
+    rows: number,
+  ): void {
+    const args = parseShellArgs(settings);
+
+    this.pty = ptyModule.spawn(settings.terminalShell, args, {
       name: "xterm-256color",
-      cols: 80,
-      rows: 24,
+      cols,
+      rows,
       cwd,
       env: {
         ...process.env,
         TERM: "xterm-256color",
         COLORTERM: "truecolor",
+        LANG: process.env.LANG || "en_US.UTF-8",
+        LC_ALL: process.env.LC_ALL || "en_US.UTF-8",
+        GTFO_TERMINAL: "1",
       },
     });
 
     this.pty.onData((data: string) => {
-      for (const cb of this.dataCallbacks) cb(data);
+      this.logDebug(`out: ${JSON.stringify(data)}\n`);
+      this.emitData(data);
     });
 
     this.pty.onExit((e: { exitCode: number }) => {
+      this.logDebug(`exit: code=${e.exitCode}\n`);
       for (const cb of this.exitCallbacks) cb(e.exitCode);
       this.pty = null;
     });
@@ -134,7 +186,8 @@ export class TerminalManager {
       `Error: ${this.nodePtyLoadError || "unknown"}\x1b[0m\r\n\r\n`,
     );
 
-    const proc = spawn(settings.terminalShell, ["-i"], {
+    const args = parseShellArgs(settings);
+    const proc = spawn(settings.terminalShell, args.length ? args : ["-i"], {
       cwd,
       env: {
         ...process.env,
@@ -164,6 +217,7 @@ export class TerminalManager {
   }
 
   write(data: string): void {
+    this.logDebug(`in:  ${JSON.stringify(data)}\n`);
     if (this.pty) {
       this.pty.write(data);
     } else if (this.fallbackProc?.stdin?.writable) {
@@ -172,6 +226,11 @@ export class TerminalManager {
   }
 
   resize(cols: number, rows: number): void {
+    if (!cols || !rows) return;
+    if (cols === this.lastCols && rows === this.lastRows) return;
+    this.lastCols = cols;
+    this.lastRows = rows;
+    this.logDebug(`resize: ${cols}x${rows}\n`);
     this.pty?.resize(cols, rows);
   }
 
@@ -184,10 +243,17 @@ export class TerminalManager {
       this.fallbackProc.kill();
       this.fallbackProc = null;
     }
+    this.lastCols = 0;
+    this.lastRows = 0;
+  }
+
+  clearScrollback(): void {
+    this.scrollback = "";
   }
 
   onData(callback: (data: string) => void): () => void {
     this.dataCallbacks.push(callback);
+    if (this.scrollback) callback(this.scrollback);
     return () => {
       this.dataCallbacks = this.dataCallbacks.filter((cb) => cb !== callback);
     };
@@ -207,6 +273,56 @@ export class TerminalManager {
   }
 
   private emitData(data: string): void {
+    this.scrollback += data;
+    if (this.scrollback.length > MAX_BUFFER_BYTES) {
+      this.scrollback = this.scrollback.slice(-MAX_BUFFER_BYTES);
+    }
     for (const cb of this.dataCallbacks) cb(data);
   }
+
+  private logDebug(line: string): void {
+    if (!this.debugMode || !this.debugAppend) return;
+    try {
+      this.debugAppend(line);
+    } catch {
+      // swallow
+    }
+  }
+
+  get debugPath(): string | null {
+    return this.debugLogPath;
+  }
+}
+
+/**
+ * Parse shell args from the settings string. Supports quoted segments.
+ */
+function parseShellArgs(settings: GtfoSettings): string[] {
+  const raw = (settings.terminalShellArgs || "").trim();
+  if (!raw) return [];
+  // Simple tokenizer supporting single and double quoted strings
+  const tokens: string[] = [];
+  let cur = "";
+  let quote: string | null = null;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (quote) {
+      if (ch === quote) {
+        quote = null;
+      } else {
+        cur += ch;
+      }
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === " " || ch === "\t") {
+      if (cur) {
+        tokens.push(cur);
+        cur = "";
+      }
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur) tokens.push(cur);
+  return tokens;
 }

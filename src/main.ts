@@ -1,7 +1,6 @@
 import { Plugin, Notice } from "obsidian";
 import type { OAuthTokens, OAuthClientInformationFull } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { GtfoSidebarView, VIEW_TYPE_GTFO } from "./views/sidebar-view";
-import { GleanSearchModal } from "./modals/search-modal";
 import { GleanMCPClient } from "./mcp/client";
 import type { OAuthStorage } from "./mcp/oauth-provider";
 import { NodeGateway } from "./gateway";
@@ -9,6 +8,7 @@ import { TerminalManager } from "./tools/terminal-manager";
 import { VaultTools } from "./tools/vault-tools";
 import { ToolRegistry } from "./tools/tool-registry";
 import { NoteInserter } from "./utils/note-inserter";
+import { DebugLogger } from "./debug/debug-logger";
 import { GtfoSettingTab } from "./settings";
 import { DEFAULT_SETTINGS, type GtfoSettings } from "./types";
 
@@ -27,6 +27,7 @@ export default class GtfoPlugin extends Plugin {
   vaultTools!: VaultTools;
   toolRegistry: ToolRegistry = new ToolRegistry();
   noteInserter!: NoteInserter;
+  debugLogger!: DebugLogger;
 
   private data: GtfoData = { settings: DEFAULT_SETTINGS };
 
@@ -35,6 +36,7 @@ export default class GtfoPlugin extends Plugin {
 
     this.vaultTools = new VaultTools(this.app);
     this.noteInserter = new NoteInserter(this.vaultTools);
+    this.debugLogger = new DebugLogger(this.vaultTools);
 
     const adapter = this.app.vault.adapter as { getBasePath?: () => string };
     const vaultBase = adapter.getBasePath?.() || "";
@@ -42,6 +44,8 @@ export default class GtfoPlugin extends Plugin {
       const pluginAbsDir = require("path").join(vaultBase, this.manifest.dir);
       this.terminalManager.setPluginDir(pluginAbsDir);
     }
+
+    this.configureTerminalDebug();
 
     this.registerView(VIEW_TYPE_GTFO, (leaf) => new GtfoSidebarView(leaf, this));
 
@@ -54,12 +58,10 @@ export default class GtfoPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "gtfo-quick-search",
-      name: "Quick search Glean",
+      id: "gtfo-open-chat",
+      name: "Open GTFO chat",
       hotkeys: [{ modifiers: ["Mod", "Shift"], key: "g" }],
-      callback: () => {
-        new GleanSearchModal(this).open();
-      },
+      callback: () => this.activateView(),
     });
 
     this.addCommand({
@@ -91,9 +93,15 @@ export default class GtfoPlugin extends Plugin {
 
     this.registerVaultTools();
 
-    if (this.settings.mcpServerUrl && this.settings.authMethod === "token" && this.settings.apiToken) {
+    // Auto-reconnect on startup if we have credentials
+    const canAutoReconnect =
+      this.settings.mcpServerUrl &&
+      ((this.settings.authMethod === "token" && this.settings.apiToken) ||
+        (this.settings.authMethod === "oauth" && this.data.oauthTokens));
+
+    if (canAutoReconnect) {
       try {
-        await this.connectToGlean();
+        await this.connectToGlean({ silent: true });
       } catch {
         // Silent fail on startup -- user can reconnect manually
       }
@@ -105,9 +113,11 @@ export default class GtfoPlugin extends Plugin {
     await this.mcpClient.disconnect();
   }
 
-  async connectToGlean(): Promise<void> {
+  async connectToGlean(opts?: { silent?: boolean }): Promise<void> {
+    const silent = opts?.silent ?? false;
+
     if (!this.settings.mcpServerUrl) {
-      new Notice("Set MCP Server URL in GTFO settings first");
+      if (!silent) new Notice("Set MCP Server URL in GTFO settings first");
       return;
     }
 
@@ -144,16 +154,17 @@ export default class GtfoPlugin extends Plugin {
       // OAuth redirect is expected to interrupt the initial connection
       if (errStr.includes("Unauthorized") || errStr.includes("auth")) {
         console.log("[GTFO] OAuth redirect initiated, waiting for callback...");
-        new Notice("Redirecting to Glean for authentication...");
+        if (!silent) new Notice("Redirecting to Glean for authentication...");
         return;
       }
-      new Notice(`Connection failed: ${e}`);
+      if (!silent) new Notice(`Connection failed: ${e}`);
       throw e;
     }
 
     try {
       const tools = await this.mcpClient.listTools();
-      new Notice(`Connected to Glean (${tools.length} tools available)`);
+      if (!silent) new Notice(`Connected to Glean (${tools.length} tools available)`);
+      else console.log(`[GTFO] Auto-reconnected to Glean (${tools.length} tools)`);
 
       // Refresh the sidebar if it's open
       const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_GTFO);
@@ -197,6 +208,60 @@ export default class GtfoPlugin extends Plugin {
   async saveSettings(): Promise<void> {
     this.data.settings = this.settings;
     await this.saveData(this.data);
+    this.configureTerminalDebug();
+  }
+
+  /**
+   * Configure the terminal manager's debug logging based on current settings.
+   * When debug mode is on, PTY input/output is appended to a debug note.
+   */
+  configureTerminalDebug(): void {
+    if (!this.settings.debugMode) {
+      this.terminalManager.setDebug(false);
+      return;
+    }
+
+    const stamp = new Date()
+      .toISOString()
+      .replace(/[:.]/g, "-")
+      .replace("T", "_")
+      .split("Z")[0];
+    const folder = (this.settings.debugFolder || "gtfo-debug").replace(/\/$/, "");
+    const logPath = `${folder}/${stamp}__terminal.md`;
+
+    let pending = "";
+    let flushTimer: number | null = null;
+    let initialized = false;
+
+    const flush = async () => {
+      if (!pending) return;
+      const chunk = pending;
+      pending = "";
+      try {
+        if (!initialized) {
+          initialized = true;
+          const header =
+            "---\nsource: gtfo-debug\nmode: terminal\n---\n\n" +
+            "# Terminal IO log\n\n```text\n";
+          await this.vaultTools.createNote(logPath, header + chunk);
+        } else {
+          await this.vaultTools.appendToNote(logPath, chunk);
+        }
+      } catch (e) {
+        console.error("[GTFO] terminal debug log flush failed:", e);
+      }
+    };
+
+    const appender = (line: string) => {
+      pending += line;
+      if (flushTimer !== null) window.clearTimeout(flushTimer);
+      flushTimer = window.setTimeout(() => {
+        flushTimer = null;
+        void flush();
+      }, 250);
+    };
+
+    this.terminalManager.setDebug(true, appender, logPath);
   }
 
   private registerVaultTools(): void {

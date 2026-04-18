@@ -994,3 +994,299 @@
   z-index: 2;
   position: relative;
 }
+
+/* ==========================================================================
+   Settings — tool management cards
+   ========================================================================== */
+.gtfo-tools-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 8px 0 20px;
+}
+
+.gtfo-tool-card {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  background: var(--background-secondary);
+  transition: opacity 120ms ease;
+}
+
+.gtfo-tool-card--disabled {
+  opacity: 0.55;
+}
+
+.gtfo-tool-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.gtfo-tool-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.gtfo-tool-name {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.gtfo-tool-name code {
+  font-family: var(--font-monospace);
+  font-weight: 600;
+  font-size: 13px;
+  padding: 2px 6px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+}
+
+.gtfo-tool-title {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.gtfo-tool-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.gtfo-tool-toggle-input {
+  cursor: pointer;
+}
+
+.gtfo-tool-toggle-label {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.gtfo-tool-desc {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.gtfo-tool-details {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.gtfo-tool-details-summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 12px;
+  user-select: none;
+  list-style: none;
+  padding: 4px 0;
+}
+
+.gtfo-tool-details-summary::-webkit-details-marker {
+  display: none;
+}
+
+.gtfo-tool-details-summary::before {
+  content: "▸";
+  display: inline-block;
+  width: 12px;
+  transition: transform 120ms ease;
+  color: var(--text-faint);
+}
+
+.gtfo-tool-details[open] > .gtfo-tool-details-summary::before {
+  transform: rotate(90deg);
+}
+
+.gtfo-tool-details-summary:hover {
+  color: var(--text-normal);
+}
+
+.gtfo-tool-subheading {
+  margin: 10px 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
+.gtfo-tool-params-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.gtfo-tool-params-table th {
+  text-align: left;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  font-weight: 600;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.gtfo-tool-params-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  vertical-align: top;
+}
+
+.gtfo-tool-params-table tr:last-child td {
+  border-bottom: none;
+}
+
+.gtfo-param-name {
+  white-space: nowrap;
+}
+
+.gtfo-param-name code {
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  padding: 1px 5px;
+  background: var(--background-primary);
+  border-radius: 3px;
+}
+
+.gtfo-param-required {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-on-accent);
+  background: var(--interactive-accent);
+  padding: 1px 5px;
+  border-radius: 3px;
+  vertical-align: middle;
+}
+
+.gtfo-param-type {
+  color: var(--text-muted);
+  font-family: var(--font-monospace);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.gtfo-param-desc {
+  color: var(--text-normal);
+  line-height: 1.4;
+}
+
+.gtfo-param-enum,
+.gtfo-param-default {
+  margin-top: 2px;
+  color: var(--text-faint);
+  font-family: var(--font-monospace);
+  font-size: 11px;
+}
+
+.gtfo-tool-empty {
+  color: var(--text-faint);
+  font-size: 12px;
+  font-style: italic;
+  margin: 6px 0;
+}
+
+/* ---- Tool management modal ---- */
+.gtfo-tool-management-modal {
+  width: min(820px, 92vw);
+  max-height: 85vh;
+}
+
+.gtfo-tool-management-modal .modal-content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 12px;
+  padding: 16px 20px;
+}
+
+.gtfo-tool-management-modal h3 {
+  margin: 0;
+}
+
+.gtfo-tool-modal-meta {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+  /* Prevent the meta from being shrunk by the flex parent so the
+     scrollable list grows into the remaining height instead. */
+  flex-shrink: 0;
+}
+
+/* Modal-scoped variant of the tools list: takes remaining vertical
+   space and scrolls inside, so the cards never push the dialog past
+   85vh. The non-modal variant (settings page) is gone, but the base
+   styles still apply. */
+.gtfo-tools-list--modal {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0;
+  padding-right: 4px;
+}
+
+/* ---- Raw tools/list modal ---- */
+.gtfo-raw-tools-modal {
+  /* Override Obsidian's default modal width — tools/list payloads
+     are mostly long lines (descriptions + schemas), so a wider modal
+     scrolls less awkwardly than the default 600px. */
+  width: min(900px, 90vw);
+  max-height: 85vh;
+}
+
+.gtfo-raw-tools-modal .modal-content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 8px;
+}
+
+.gtfo-raw-tools-modal h3 {
+  margin: 0;
+}
+
+.gtfo-raw-tools-modal .gtfo-raw-meta {
+  color: var(--text-faint);
+  font-size: 12px;
+  font-family: var(--font-monospace);
+}
+
+.gtfo-raw-tools-modal .gtfo-raw-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.gtfo-raw-tools-modal .gtfo-raw-pre {
+  flex: 1;
+  min-height: 200px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.gtfo-raw-tools-modal .gtfo-raw-pre code {
+  font-family: var(--font-monospace);
+  white-space: pre;
+  color: var(--text-normal);
+  background: transparent;
+  padding: 0;
+  border: none;
+  font-size: inherit;
+}

@@ -3,6 +3,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { ObsidianOAuthProvider, type OAuthStorage } from "./oauth-provider";
 import type { NodeGateway } from "../gateway";
 import type { OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
+import type { DiscoveredTool } from "../types";
 
 export interface MCPConnectionOptions {
   serverUrl: string;
@@ -38,9 +39,29 @@ export class GleanMCPClient {
   private transport: StreamableHTTPClientTransport | null = null;
   private oauthProvider: ObsidianOAuthProvider | null = null;
   private _connected = false;
+  private _lastListToolsRaw: unknown = undefined;
+
+  /**
+   * Predicate used to gate outgoing tool calls. When it returns true
+   * for a given tool name, `callTool` throws before contacting the
+   * server. Lets users turn individual tools off from the settings
+   * panel without restarting the plugin.
+   */
+  isToolDisabled?: (name: string) => boolean;
 
   get connected(): boolean {
     return this._connected;
+  }
+
+  /**
+   * The full unprojected MCP `tools/list` response from the most
+   * recent `listTools()` call (or undefined if never called). Powers
+   * the "View raw" button in Settings → Tools — mirrors what the
+   * server actually sent over the wire, including fields we don't
+   * surface in `DiscoveredTool` (annotations, output schemas, _meta).
+   */
+  get lastListToolsRaw(): unknown {
+    return this._lastListToolsRaw;
   }
 
   async connect(options: MCPConnectionOptions): Promise<void> {
@@ -94,13 +115,34 @@ export class GleanMCPClient {
     }
   }
 
-  async listTools(): Promise<{ name: string; description?: string }[]> {
+  async listTools(): Promise<DiscoveredTool[]> {
     this.ensureConnected();
     const result = await this.client!.listTools();
-    return result.tools.map((t) => ({
-      name: t.name,
-      description: t.description,
-    }));
+    this._lastListToolsRaw = result;
+    return result.tools.map((t) => {
+      const raw = t as {
+        name: string;
+        title?: string;
+        description?: string;
+        inputSchema?: {
+          type?: string;
+          properties?: Record<string, unknown>;
+          required?: string[];
+        };
+      };
+      return {
+        name: raw.name,
+        title: raw.title,
+        description: raw.description,
+        inputSchema: raw.inputSchema
+          ? {
+              type: "object",
+              properties: raw.inputSchema.properties,
+              required: raw.inputSchema.required,
+            }
+          : undefined,
+      };
+    });
   }
 
   async callTool(
@@ -109,6 +151,11 @@ export class GleanMCPClient {
     options: MCPCallOptions = {},
   ): Promise<unknown> {
     this.ensureConnected();
+    if (this.isToolDisabled?.(name)) {
+      throw new Error(
+        `Tool "${name}" is disabled. Enable it under Settings → Tools.`,
+      );
+    }
     const requestOptions: Record<string, unknown> = {};
     if (options.signal) requestOptions.signal = options.signal;
     if (options.timeout !== undefined) requestOptions.timeout = options.timeout;

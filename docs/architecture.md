@@ -97,11 +97,26 @@ User types, presses Ctrl+Enter (or Cmd/Opt+Enter)
   → ChatTab.sendMessage("search")
   → User message prefixed with 🔍 for visual distinction
   → GleanMCPClient.search(query)
-  → parseSearchResults from MCP response
-  → Results formatted as a plain Markdown bullet list (no JSON wrap)
+  → parseSearchResults walks the YAML blob (Glean returns YAML, not
+    JSON) and yields one GleanSearchResult per top-level document:
+    title, url, datasource, owner (updatedBy.name → owner.name fallback),
+    lastUpdated, and the first non-image snippet (HTML stripped).
+  → formatSearchResults renders a tight two-line block per result:
+    bold linked title with a `·`-separated meta line (datasource ·
+    relative time · `by Person`), then the snippet on a hard-broken
+    second line. Snippets have leading block-starters (`#`, `-`, `>`)
+    stripped so they don't render as headings/lists/quotes.
   → Rendered inline in the same chat conversation
   → Metrics shown (req_ms, N results, bytes — no "tokens")
 ```
+
+Why we parse YAML: the MCP `search` tool wraps its result in the
+standard `{ content: [{ type: "text", text: ... }] }` envelope, but
+the inner `text` is a YAML dump (with `documents[N]:`, nested
+`similarResults`, image-tagged snippets, etc.) — not JSON. Naive
+field lookups would also wrongly attribute nested
+`similarResults.visibleResults[*].title` to the parent document, so
+matching is anchored at the document's exact indent.
 
 ### New chat
 
@@ -251,6 +266,16 @@ Secondary guard: `TerminalManager.resize()` no-ops if the dimensions haven't cha
 ### Tool Registry
 
 Every capability is a `ToolDefinition` with `{ name, description, parameters, execute }`. This schema is compatible with OpenAI function calling, Anthropic tool use, and MCP tool schemas. A future agent loop can use `toolRegistry.toFunctionSchemas()` and `toolRegistry.execute(name, args)` to plan and invoke without special-casing each tool.
+
+### Tools settings panel
+
+MCP tools discovered via `tools/list` are surfaced under Settings → Tools as a single summary row with three actions:
+
+- **Refresh**: re-query the server and update `discoveredTools`.
+- **Manage**: open `ToolManagementModal` — a focused dialog with one card per tool (enable/disable toggle + JSON-Schema parameters table from `tool.inputSchema.properties`, marking `required` fields and surfacing `enum` / `default` when present). The card list scrolls inside the modal, so the settings tab never grows unbounded as more tools come online.
+- **View raw**: open `RawToolsListModal` — a dump of the unprojected `tools/list` payload (cached on `GleanMCPClient.lastListToolsRaw`). Useful for inspecting fields we don't surface in `DiscoveredTool` — annotations, output schemas, `_meta` — and for sharing the payload with someone debugging a misbehaving server.
+
+Toggling a card persists to `disabledTools: string[]` in settings. `GleanMCPClient.isToolDisabled` is a plugin-provided predicate consulted inside `callTool` — disabled tools throw before any network traffic, so the gate is effective for any caller (chat, search, future agent loops).
 
 ### Terminal fallback
 

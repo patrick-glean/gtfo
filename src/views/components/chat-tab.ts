@@ -519,34 +519,52 @@ export class ChatTab {
     }
   }
 
+  /**
+   * Glean's MCP `search` tool returns results as a YAML-formatted text
+   * dump under `content[0].text` (not JSON, despite the surrounding MCP
+   * envelope). The blob looks like:
+   *
+   *   documents[N]:
+   *     - createTime: "..."
+   *       datasource: gdrive
+   *       owner:
+   *         name: ...
+   *       snippets[N]:
+   *         - "..."
+   *       title: ...
+   *       updateTime: "..."
+   *       updatedBy:
+   *         name: ...
+   *       url: "..."
+   *
+   * We split on top-level document boundaries and pull out the fields
+   * the web UI shows: title, url, datasource, updater, last-updated
+   * timestamp, and the first non-image snippet (cleaned of HTML).
+   */
   private parseSearchResults(response: unknown): GleanSearchResult[] {
     if (!response || typeof response !== "object") return [];
-    const resp = response as { content?: { type: string; text: string }[] };
-    if (!resp.content) return [];
-    const textContent = resp.content.find((c) => c.type === "text");
-    if (!textContent) return [];
-    try {
-      const parsed = JSON.parse(textContent.text);
-      const items = Array.isArray(parsed) ? parsed : parsed.results || [];
-      return items.map((r: Record<string, string>) => ({
-        title: r.title || "Untitled",
-        url: r.url || "",
-        snippet: r.snippet || r.description || "",
-        source: r.source || r.datasource || "",
-        lastUpdated: r.lastUpdated || undefined,
-      }));
-    } catch {
-      return [
-        {
-          title: "Results",
-          url: "",
-          snippet: textContent.text,
-          source: "Glean",
-        },
-      ];
+    const resp = response as Record<string, unknown>;
+    let raw = "";
+    if (Array.isArray(resp.content)) {
+      raw = (resp.content as { type: string; text: string }[])
+        .filter((c) => c.type === "text")
+        .map((c) => c.text)
+        .join("\n");
+    } else if (typeof resp.text === "string") {
+      raw = resp.text;
     }
+    if (!raw) return [];
+    return parseSearchYamlBlob(raw);
   }
 
+  /**
+   * Render results in a tight two-line format: bold linked title with
+   * a `·`-separated meta line (datasource, relative time, attribution),
+   * then the snippet on the next line. A trailing two-space hard break
+   * keeps the snippet attached to its title within a single paragraph,
+   * so paragraph spacing only kicks in between results — much denser
+   * than card-style separators.
+   */
   private formatSearchResults(
     query: string,
     results: GleanSearchResult[],
@@ -554,17 +572,29 @@ export class ChatTab {
     if (results.length === 0) {
       return `**No results for "${query}".** Try a different query.`;
     }
-    return results
-      .slice(0, 10)
-      .map((r) => {
-        const parts: string[] = [];
-        if (r.url) parts.push(`- **[${r.title}](${r.url})**`);
-        else parts.push(`- **${r.title}**`);
-        if (r.source) parts[0] += ` · *${r.source}*`;
-        if (r.snippet) parts.push(`  ${r.snippet}`);
-        return parts.join("\n");
-      })
-      .join("\n\n");
+    const total = results.length;
+    const shown = Math.min(total, 10);
+    const blocks = results.slice(0, shown).map((r) => {
+      const titleText = r.url ? `[${r.title.trim()}](${r.url})` : r.title.trim();
+      const meta: string[] = [];
+      if (r.source) meta.push(r.source);
+      if (r.lastUpdated) {
+        const rel = formatRelativeTime(r.lastUpdated);
+        if (rel) meta.push(rel);
+      }
+      // Attribution attaches to the time chip without a middot so it
+      // reads naturally ("4d ago by Kiril") instead of ("4d ago · by Kiril").
+      let metaStr = meta.join(" · ");
+      if (r.owner) metaStr += metaStr ? ` by ${r.owner}` : `by ${r.owner}`;
+      const head = metaStr ? `**${titleText}** · ${metaStr}` : `**${titleText}**`;
+      if (!r.snippet) return head;
+      const snippet = truncateText(r.snippet, 160);
+      // Trailing two spaces force a `<br>` so the snippet sits directly
+      // under the title in the same paragraph.
+      return `${head}  \n${snippet}`;
+    });
+    const footer = total > shown ? `\n\n…and ${total - shown} more.` : "";
+    return blocks.join("\n\n") + footer;
   }
 
   private renderMessages(): void {
@@ -1536,5 +1566,353 @@ function matchYamlField(block: string, key: string): string | null {
     }
   }
   return v.trim();
+}
+
+// ===================================================================
+// Search response YAML parser (Glean MCP `search` tool)
+// ===================================================================
+
+/**
+ * Walk Glean's YAML search blob and yield one GleanSearchResult per
+ * top-level document. We split on document boundaries first so each
+ * field lookup is scoped to the right document — naively scanning the
+ * whole blob would pick up nested `title:` fields from
+ * `similarResults.visibleResults[]` and attribute them to the wrong
+ * row.
+ */
+function parseSearchYamlBlob(text: string): GleanSearchResult[] {
+  const blocks = splitDocumentBlocks(text);
+  const results: GleanSearchResult[] = [];
+  for (const block of blocks) {
+    // Normalize: strip the leading `  - ` (or `  -`) so every doc-level
+    // field lives at exactly 4-space indent. This lets us anchor field
+    // matches at column 4 and ignore deeper-nested values like
+    // similarResults.visibleResults[*].title.
+    const normalized = block.replace(/^  -(?: |$)/m, "    ");
+
+    const title = matchYamlFieldAtIndent(normalized, "title", 4);
+    if (!title) continue;
+    const url = matchYamlFieldAtIndent(normalized, "url", 4) ?? "";
+    const datasource = matchYamlFieldAtIndent(normalized, "datasource", 4) ?? "";
+    const updateTime = matchYamlFieldAtIndent(normalized, "updateTime", 4)
+      ?? matchYamlFieldAtIndent(normalized, "createTime", 4)
+      ?? undefined;
+    // Prefer updatedBy.name (matches the web UI's "Updated … by …"
+    // attribution); fall back to owner.name, then ownedAndUpdatedBy.name.
+    const owner =
+      matchNestedYamlNameField(normalized, "updatedBy", 4) ??
+      matchNestedYamlNameField(normalized, "owner", 4) ??
+      matchNestedYamlNameField(normalized, "ownedAndUpdatedBy", 4) ??
+      undefined;
+    const snippet = extractFirstUsefulSnippet(normalized) ?? "";
+
+    results.push({
+      title,
+      url,
+      snippet,
+      source: datasource,
+      lastUpdated: updateTime,
+      owner,
+    });
+  }
+  return results;
+}
+
+/**
+ * Split a Glean search YAML blob into one chunk per top-level document.
+ *
+ * The structure is:
+ *   documents[N]:
+ *     - <field>: ...     <- new doc starts here (2-space + dash)
+ *       <field>: ...
+ *     - <field>: ...     <- next doc
+ *
+ * We track entry into the documents array, then capture every line up
+ * to (but not including) the next `  - ` boundary or a column-0 key
+ * (which would mean the documents block ended).
+ */
+function splitDocumentBlocks(text: string): string[] {
+  const lines = text.split("\n");
+  const blocks: string[] = [];
+  let inArray = false;
+  let current: string[] | null = null;
+
+  const flush = (): void => {
+    if (current && current.length > 0) blocks.push(current.join("\n"));
+    current = null;
+  };
+
+  for (const line of lines) {
+    if (/^documents\[\d+\]:\s*$/.test(line)) {
+      flush();
+      inArray = true;
+      continue;
+    }
+    if (!inArray) continue;
+
+    // New document boundary — `  - <field>:` or bare `  -` (when the
+    // first field is a nested object like `channel:` for slack docs).
+    if (/^  - /.test(line) || /^  -\s*$/.test(line)) {
+      flush();
+      current = [line];
+      continue;
+    }
+
+    if (current === null) continue;
+
+    if (line.length === 0 || line.startsWith("    ")) {
+      current.push(line);
+      continue;
+    }
+
+    // A column-0 (or shallower than 4) non-empty line marks the end of
+    // the documents array (top-level keys like `messages:` or
+    // `chatId:`). Stop collecting here.
+    flush();
+    inArray = false;
+  }
+  flush();
+  return blocks;
+}
+
+/**
+ * Match a YAML field whose key sits at exactly the given indent level.
+ * Used to scope lookups to the document's own fields and skip any
+ * deeper-nested copies of the same key (e.g. nested `title:` inside
+ * similarResults.visibleResults[]).
+ */
+function matchYamlFieldAtIndent(
+  block: string,
+  key: string,
+  indent: number,
+): string | null {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(
+    `^[ \\t]{${indent}}${escaped}:[ \\t]*("(?:\\\\.|[^"\\\\])*"|[^\\n]*)`,
+    "m",
+  );
+  const m = re.exec(block);
+  if (!m) return null;
+  const raw = m[1].trim();
+  if (!raw) return null;
+  if (raw.startsWith('"')) {
+    // Take only the first quoted string — strips trailing junk like
+    // ",foo" if a value got concatenated with a CSV-style sibling.
+    const closeIdx = findClosingQuote(raw, 0);
+    const slice = closeIdx > 0 ? raw.substring(0, closeIdx + 1) : raw;
+    try {
+      return JSON.parse(slice);
+    } catch {
+      return slice.replace(/^"|"$/g, "");
+    }
+  }
+  return raw;
+}
+
+/**
+ * Read `<parent>.name` where `<parent>` is itself a nested object at
+ * the given indent (i.e. its `name:` child is at indent + 2).
+ */
+function matchNestedYamlNameField(
+  block: string,
+  parent: string,
+  indent: number,
+): string | null {
+  const escaped = parent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`^[ \\t]{${indent}}${escaped}:[ \\t]*$`, "m");
+  const m = re.exec(block);
+  if (!m) return null;
+  const after = block.substring(m.index + m[0].length);
+  const nameRe = new RegExp(`^[ \\t]{${indent + 2}}name:[ \\t]*(.+?)\\s*$`, "m");
+  const nm = nameRe.exec(after);
+  if (!nm) return null;
+  const v = nm[1];
+  if (v.startsWith('"') && v.endsWith('"')) {
+    try {
+      return JSON.parse(v);
+    } catch {
+      return v.slice(1, -1);
+    }
+  }
+  return v.trim();
+}
+
+/**
+ * Pick the first snippet that's actually informative — skip image
+ * tags, image-file pseudo-headings (`# image1.png`), and the "we do
+ * not have snippets for this document" boilerplate.
+ *
+ * Snippets appear in two YAML shapes:
+ *   snippets[N]: "first",second,"third"        (inline CSV)
+ *   snippets[N]:
+ *     - "first"                                 (multi-line list)
+ *     - second
+ */
+function extractFirstUsefulSnippet(block: string): string | null {
+  const lines = block.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^[ \t]{4}snippets\[\d+\]:[ \t]*(.*)$/);
+    if (!m) continue;
+    const inline = m[1];
+    const candidates: string[] = [];
+    if (inline.length > 0) {
+      candidates.push(...splitInlineSnippets(inline));
+    } else {
+      for (let j = i + 1; j < lines.length && candidates.length < 6; j++) {
+        const itemLine = lines[j];
+        const im = itemLine.match(/^[ \t]{6}-[ \t]*(.*)$/);
+        if (im) {
+          candidates.push(parseQuotedOrBareYaml(im[1]));
+          continue;
+        }
+        // Indent dropped back to a doc field — end of this snippet list.
+        if (itemLine.length > 0 && !itemLine.startsWith("        ")) break;
+      }
+    }
+    for (const c of candidates) {
+      const cleaned = cleanSnippetText(c);
+      if (cleaned) return cleaned;
+    }
+  }
+  return null;
+}
+
+/**
+ * Split an inline `"a","b",c` snippet payload into its component
+ * fields. Quotes wrap most fields; bare ones (no commas inside) appear
+ * between commas.
+ */
+function splitInlineSnippets(s: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < s.length) {
+    // Skip whitespace and one leading comma.
+    while (i < s.length && (s[i] === " " || s[i] === "\t")) i++;
+    if (s[i] === ",") {
+      i++;
+      continue;
+    }
+    if (s[i] === '"') {
+      const end = findClosingQuote(s, i);
+      if (end < 0) break;
+      const quoted = s.substring(i, end + 1);
+      try {
+        out.push(JSON.parse(quoted));
+      } catch {
+        out.push(quoted.slice(1, -1));
+      }
+      i = end + 1;
+    } else {
+      const next = s.indexOf(",", i);
+      const end = next < 0 ? s.length : next;
+      const bare = s.substring(i, end).trim();
+      if (bare) out.push(bare);
+      i = end;
+    }
+  }
+  return out;
+}
+
+function findClosingQuote(s: string, start: number): number {
+  if (s[start] !== '"') return -1;
+  let i = start + 1;
+  let escaped = false;
+  while (i < s.length) {
+    const ch = s[i];
+    if (escaped) {
+      escaped = false;
+      i++;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      i++;
+      continue;
+    }
+    if (ch === '"') return i;
+    i++;
+  }
+  return -1;
+}
+
+function parseQuotedOrBareYaml(s: string): string {
+  const trimmed = s.trim();
+  if (!trimmed) return "";
+  if (trimmed.startsWith('"')) {
+    const close = findClosingQuote(trimmed, 0);
+    if (close > 0) {
+      const quoted = trimmed.substring(0, close + 1);
+      try {
+        return JSON.parse(quoted);
+      } catch {
+        return quoted.slice(1, -1);
+      }
+    }
+  }
+  return trimmed;
+}
+
+/**
+ * Decide whether a raw snippet is worth showing. Image tags get their
+ * alt text mined; image-file pseudo-headings and boilerplate are
+ * dropped; everything else has its HTML stripped and is collapsed onto
+ * a single line.
+ */
+function cleanSnippetText(raw: string): string | null {
+  let text = raw.trim();
+  if (!text) return null;
+
+  const imgAlt = text.match(/^<img\s[^>]*\balt=(?:"([^"]*)"|'([^']*)')/i);
+  if (imgAlt) {
+    text = (imgAlt[1] ?? imgAlt[2] ?? "").trim();
+    if (!text) return null;
+  } else if (text.includes("<")) {
+    text = text.replace(/<[^>]+>/g, "").trim();
+    if (!text) return null;
+  }
+
+  if (/^#\s+image\d*\.\w+\s*$/i.test(text)) return null;
+  if (/^#\s+image\d+\s*$/i.test(text)) return null;
+  if (text.startsWith("We do not have snippets for this document")) return null;
+
+  // Strip leading block-starters so snippets don't accidentally render
+  // as headings (`# foo`), bullets (`- foo`, `* foo`), or blockquotes
+  // (`> foo`) inside the result line.
+  text = text
+    .replace(/^#+\s+/, "")
+    .replace(/^[-*+]\s+/, "")
+    .replace(/^>\s+/, "")
+    .trim();
+  if (!text) return null;
+
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Render an ISO timestamp as a short relative-time label ("today",
+ * "3d ago", "2w ago", "5mo ago", "2y ago"). Returns null on parse
+ * failure so callers can omit the field entirely.
+ */
+function formatRelativeTime(iso: string): string | null {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return null;
+  const diffMs = Date.now() - t;
+  const sec = diffMs / 1000;
+  if (sec < 60) return "just now";
+  const min = sec / 60;
+  if (min < 60) return `${Math.floor(min)}m ago`;
+  const hr = min / 60;
+  if (hr < 24) return `${Math.floor(hr)}h ago`;
+  const day = hr / 24;
+  if (day < 1.5) return "yesterday";
+  if (day < 7) return `${Math.floor(day)}d ago`;
+  if (day < 30) return `${Math.floor(day / 7)}w ago`;
+  if (day < 365) return `${Math.floor(day / 30)}mo ago`;
+  return `${Math.floor(day / 365)}y ago`;
+}
+
+function truncateText(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  return text.substring(0, maxLen - 1).trimEnd() + "…";
 }
 

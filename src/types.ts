@@ -31,6 +31,12 @@ export interface GtfoSettings {
   includeVaultListing: boolean;
   vaultListingExcludes: string;
   vaultListingMaxChars: number;
+  /**
+   * MCP tools the user has turned off in the Tools settings panel.
+   * Calls to these names will throw before hitting the server. Enables
+   * quick containment of noisy or misbehaving tools without a restart.
+   */
+  disabledTools: string[];
 }
 
 export const DEFAULT_SETTINGS: GtfoSettings = {
@@ -59,6 +65,7 @@ export const DEFAULT_SETTINGS: GtfoSettings = {
   includeVaultListing: true,
   vaultListingExcludes: "",
   vaultListingMaxChars: 6000,
+  disabledTools: [],
 };
 
 export interface TerminalLaunchPreset {
@@ -75,12 +82,37 @@ export interface VaultEntry {
   mtime: number;
 }
 
+/**
+ * Projected metadata for an MCP tool discovered via `tools/list`.
+ * Only the fields we actually render in the Tools settings panel.
+ * `inputSchema` is a JSON Schema (type: "object") describing the
+ * tool's arguments.
+ */
+export interface DiscoveredTool {
+  name: string;
+  title?: string;
+  description?: string;
+  inputSchema?: {
+    type: "object";
+    properties?: Record<string, unknown>;
+    required?: string[];
+  };
+}
+
 export interface GleanSearchResult {
   title: string;
   url: string;
   snippet: string;
+  /** Datasource (gdrive, confluence, slack, gong, github, etc.). */
   source: string;
+  /** ISO timestamp of last update — used to render "Updated 2w ago". */
   lastUpdated?: string;
+  /**
+   * Display name of the person to attribute the result to. Prefers
+   * `updatedBy.name` when present (matches the web UI's "by …" line),
+   * falling back to `owner.name` / `ownedAndUpdatedBy.name`.
+   */
+  owner?: string;
 }
 
 export interface ChatMessage {

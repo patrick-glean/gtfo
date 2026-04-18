@@ -1,7 +1,7 @@
-import { App, PluginSettingTab, Setting, Notice } from "obsidian";
+import { App, Modal, Notice, PluginSettingTab, Setting } from "obsidian";
 import type GtfoPlugin from "./main";
 import { DEFAULT_BOOTSTRAP } from "./llm/protocol";
-import type { GtfoStats } from "./types";
+import type { DiscoveredTool, GtfoStats } from "./types";
 
 export class GtfoSettingTab extends PluginSettingTab {
   plugin: GtfoPlugin;
@@ -143,6 +143,10 @@ export class GtfoSettingTab extends PluginSettingTab {
           }),
       );
     }
+
+    // --- Tools ---
+    containerEl.createEl("h3", { text: "Tools" });
+    this.renderToolsSection(containerEl);
 
     // --- Agent Behavior ---
     containerEl.createEl("h3", { text: "Agent Behavior" });
@@ -338,6 +342,66 @@ export class GtfoSettingTab extends PluginSettingTab {
     this.renderStatsSection(containerEl);
   }
 
+  /**
+   * Tools section is just the summary row; the actual per-tool cards
+   * live in `ToolManagementModal` so the settings tab doesn't grow
+   * unbounded with however many tools the server advertises. The
+   * row's three actions:
+   *
+   *   - **Refresh**: re-query `tools/list`
+   *   - **Manage**: open the modal with togglable, scrollable cards
+   *   - **View raw**: dump the unprojected MCP response in a modal
+   */
+  private renderToolsSection(containerEl: HTMLElement): void {
+    const tools = this.plugin.discoveredTools;
+    const disabled = new Set(this.plugin.settings.disabledTools);
+    const enabledCount = tools.filter((t) => !disabled.has(t.name)).length;
+
+    const desc = this.plugin.mcpClient.connected
+      ? `${enabledCount} of ${tools.length} enabled. Disabled tools are blocked at the client — the agent won't be able to call them until re-enabled.`
+      : "Connect to Glean to list available tools.";
+
+    const summary = new Setting(containerEl)
+      .setName("Discovered tools")
+      .setDesc(desc)
+      .addButton((btn) =>
+        btn
+          .setButtonText("Refresh")
+          .setDisabled(!this.plugin.mcpClient.connected)
+          .onClick(async () => {
+            await this.plugin.refreshTools();
+            this.display();
+          }),
+      );
+
+    if (tools.length > 0) {
+      summary.addButton((btn) =>
+        btn
+          .setButtonText("Manage")
+          .setCta()
+          .onClick(() => {
+            new ToolManagementModal(this.app, this.plugin, () =>
+              this.display(),
+            ).open();
+          }),
+      );
+    }
+
+    const raw = this.plugin.mcpClient.lastListToolsRaw;
+    if (raw !== undefined) {
+      summary.addButton((btn) =>
+        btn
+          .setButtonText("View raw")
+          .setTooltip(
+            "Show the unprojected tools/list response from the MCP server.",
+          )
+          .onClick(() => {
+            new RawToolsListModal(this.app, raw).open();
+          }),
+      );
+    }
+  }
+
   private renderStatsSection(containerEl: HTMLElement): void {
     containerEl.createEl("h3", { text: "Usage Stats" });
     const stats = this.plugin.stats;
@@ -428,3 +492,240 @@ function formatBytes(bytes: number): string {
     return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`;
 }
+
+/**
+ * `JSON.stringify` with a character cap. MCP search responses can be
+ * 100+ KB of YAML wrapped in JSON — dumping the whole thing into a
+ * `<pre>` jank-scrolls the settings panel, so we truncate with a
+ * footer that tells the user how much was elided.
+ */
+function safeJson(val: unknown, maxLen: number): string {
+  let text: string;
+  try {
+    text = JSON.stringify(val, null, 2) ?? "undefined";
+  } catch (e) {
+    return `<unserializable: ${String(e)}>`;
+  }
+  if (text.length <= maxLen) return text;
+  const head = text.substring(0, maxLen);
+  return `${head}\n\n… (truncated, full length ${formatBytes(text.length)})`;
+}
+
+/**
+ * Modal that hosts the togglable, scrollable list of MCP tool cards.
+ * Lives in a focused dialog so the settings tab stays short — the
+ * card list itself can grow without pushing other settings off-screen.
+ *
+ * `onChange` is invoked when the user toggles a card so the parent
+ * settings tab can re-render its summary row's "X of Y enabled"
+ * counter without a full re-display.
+ */
+class ToolManagementModal extends Modal {
+  private plugin: GtfoPlugin;
+  private onChange: () => void;
+  private metaEl: HTMLElement | null = null;
+
+  constructor(app: App, plugin: GtfoPlugin, onChange: () => void) {
+    super(app);
+    this.plugin = plugin;
+    this.onChange = onChange;
+  }
+
+  onOpen(): void {
+    const { contentEl, modalEl } = this;
+    modalEl.addClass("gtfo-tool-management-modal");
+    contentEl.empty();
+
+    contentEl.createEl("h3", { text: "Tool management" });
+
+    this.metaEl = contentEl.createDiv({ cls: "gtfo-tool-modal-meta" });
+    this.refreshMeta();
+
+    const list = contentEl.createDiv({
+      cls: "gtfo-tools-list gtfo-tools-list--modal",
+    });
+    for (const tool of this.plugin.discoveredTools) {
+      renderToolCard(list, this.plugin, tool, () => {
+        this.refreshMeta();
+        this.onChange();
+      });
+    }
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+    this.metaEl = null;
+  }
+
+  private refreshMeta(): void {
+    if (!this.metaEl) return;
+    const tools = this.plugin.discoveredTools;
+    const disabled = new Set(this.plugin.settings.disabledTools);
+    const enabledCount = tools.filter((t) => !disabled.has(t.name)).length;
+    this.metaEl.setText(
+      `${enabledCount} of ${tools.length} enabled. Disabled tools are blocked at the client — any caller (chat, search, future agent loops) will get an error.`,
+    );
+  }
+}
+
+/**
+ * Render one tool as a card: header (name + title + enabled toggle),
+ * description, and a `<details>` panel with the JSON-Schema
+ * parameters table. Free-function so both `ToolManagementModal` (and
+ * future surfaces — e.g. an inline preview) can render the same shape.
+ */
+function renderToolCard(
+  parent: HTMLElement,
+  plugin: GtfoPlugin,
+  tool: DiscoveredTool,
+  onToggle?: () => void,
+): void {
+  const card = parent.createDiv({ cls: "gtfo-tool-card" });
+  const enabled = plugin.isToolEnabled(tool.name);
+  if (!enabled) card.addClass("gtfo-tool-card--disabled");
+
+  const header = card.createDiv({ cls: "gtfo-tool-header" });
+  const titleRow = header.createDiv({ cls: "gtfo-tool-title-row" });
+
+  const nameEl = titleRow.createDiv({ cls: "gtfo-tool-name" });
+  nameEl.createEl("code", { text: tool.name });
+  if (tool.title && tool.title !== tool.name) {
+    nameEl.createEl("span", {
+      text: ` — ${tool.title}`,
+      cls: "gtfo-tool-title",
+    });
+  }
+
+  const toggleWrap = titleRow.createDiv({ cls: "gtfo-tool-toggle" });
+  const checkbox = toggleWrap.createEl("input", {
+    type: "checkbox",
+    cls: "gtfo-tool-toggle-input",
+  });
+  checkbox.checked = enabled;
+  checkbox.addEventListener("change", async () => {
+    await plugin.setToolEnabled(tool.name, checkbox.checked);
+    card.toggleClass("gtfo-tool-card--disabled", !checkbox.checked);
+    onToggle?.();
+  });
+  toggleWrap.createEl("span", {
+    text: "Enabled",
+    cls: "gtfo-tool-toggle-label",
+  });
+
+  if (tool.description) {
+    header.createDiv({ text: tool.description, cls: "gtfo-tool-desc" });
+  }
+
+  const details = card.createEl("details", { cls: "gtfo-tool-details" });
+  details.createEl("summary", {
+    text: "Parameters",
+    cls: "gtfo-tool-details-summary",
+  });
+  renderToolParameters(details, tool);
+}
+
+function renderToolParameters(parent: HTMLElement, tool: DiscoveredTool): void {
+  const block = parent.createDiv({ cls: "gtfo-tool-params" });
+  block.createEl("h5", { text: "Parameters", cls: "gtfo-tool-subheading" });
+  const props = tool.inputSchema?.properties;
+  if (!props || Object.keys(props).length === 0) {
+    block.createDiv({
+      text: "No parameters described.",
+      cls: "gtfo-tool-empty",
+    });
+    return;
+  }
+  const required = new Set(tool.inputSchema?.required ?? []);
+  const table = block.createEl("table", { cls: "gtfo-tool-params-table" });
+  const head = table.createEl("tr");
+  head.createEl("th", { text: "Name" });
+  head.createEl("th", { text: "Type" });
+  head.createEl("th", { text: "Description" });
+  for (const [name, schema] of Object.entries(props)) {
+    const s = schema as {
+      type?: string | string[];
+      description?: string;
+      enum?: unknown[];
+      default?: unknown;
+    };
+    const row = table.createEl("tr");
+    const nameCell = row.createEl("td", { cls: "gtfo-param-name" });
+    nameCell.createEl("code", { text: name });
+    if (required.has(name)) {
+      nameCell.createEl("span", {
+        text: "required",
+        cls: "gtfo-param-required",
+      });
+    }
+    const typeStr = Array.isArray(s.type)
+      ? s.type.join(" | ")
+      : (s.type ?? "any");
+    row.createEl("td", { text: typeStr, cls: "gtfo-param-type" });
+    const descCell = row.createEl("td", { cls: "gtfo-param-desc" });
+    descCell.setText(s.description ?? "—");
+    if (Array.isArray(s.enum) && s.enum.length > 0) {
+      descCell.createDiv({
+        text: `enum: ${s.enum.map((v) => String(v)).join(", ")}`,
+        cls: "gtfo-param-enum",
+      });
+    }
+    if (s.default !== undefined) {
+      descCell.createDiv({
+        text: `default: ${safeJson(s.default, 80)}`,
+        cls: "gtfo-param-default",
+      });
+    }
+  }
+}
+
+/**
+ * Modal that dumps the unprojected `tools/list` MCP response. Useful
+ * for verifying what the server actually advertises (annotations,
+ * output schemas, _meta fields) when our `DiscoveredTool` projection
+ * isn't enough — and for sharing the payload with someone debugging a
+ * broken server.
+ */
+class RawToolsListModal extends Modal {
+  private raw: unknown;
+
+  constructor(app: App, raw: unknown) {
+    super(app);
+    this.raw = raw;
+  }
+
+  onOpen(): void {
+    const { contentEl, modalEl } = this;
+    modalEl.addClass("gtfo-raw-tools-modal");
+    contentEl.empty();
+
+    contentEl.createEl("h3", { text: "Raw tools/list response" });
+
+    const json = safeJson(this.raw, Number.POSITIVE_INFINITY);
+    const meta = contentEl.createDiv({ cls: "gtfo-raw-meta" });
+    meta.setText(`${formatBytes(json.length)} · captured from MCP server`);
+
+    const actions = contentEl.createDiv({ cls: "gtfo-raw-actions" });
+    const copyBtn = actions.createEl("button", {
+      text: "Copy JSON",
+      cls: "mod-cta",
+    });
+    copyBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(json);
+        const original = copyBtn.textContent ?? "Copy JSON";
+        copyBtn.setText("Copied");
+        window.setTimeout(() => copyBtn.setText(original), 1500);
+      } catch {
+        new Notice("Clipboard unavailable in this environment.");
+      }
+    });
+
+    const pre = contentEl.createEl("pre", { cls: "gtfo-raw-pre" });
+    pre.createEl("code", { text: json });
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+

@@ -13,6 +13,7 @@ import { GtfoSettingTab } from "./settings";
 import {
   DEFAULT_SETTINGS,
   DEFAULT_STATS,
+  type DiscoveredTool,
   type GtfoSettings,
   type GtfoStats,
 } from "./types";
@@ -45,6 +46,14 @@ export default class GtfoPlugin extends Plugin {
   noteInserter!: NoteInserter;
   debugLogger!: DebugLogger;
 
+  /**
+   * Tools advertised by the connected MCP server. Refreshed on every
+   * successful `connectToGlean` and available to the Tools settings
+   * panel without a round-trip. The full unprojected response lives on
+   * `mcpClient.lastListToolsRaw` for the "View raw" modal.
+   */
+  discoveredTools: DiscoveredTool[] = [];
+
   private data: GtfoData = { settings: DEFAULT_SETTINGS, stats: { ...DEFAULT_STATS } };
 
   async onload(): Promise<void> {
@@ -53,6 +62,11 @@ export default class GtfoPlugin extends Plugin {
     this.vaultTools = new VaultTools(this.app);
     this.noteInserter = new NoteInserter(this.vaultTools);
     this.debugLogger = new DebugLogger(this.vaultTools);
+
+    // Honour the per-tool enabled/disabled setting at the source so
+    // any callsite (chat, search, future agent tool-calls) respects it.
+    this.mcpClient.isToolDisabled = (name) =>
+      this.settings.disabledTools.includes(name);
 
     const adapter = this.app.vault.adapter as { getBasePath?: () => string };
     const vaultBase = adapter.getBasePath?.() || "";
@@ -185,6 +199,7 @@ export default class GtfoPlugin extends Plugin {
 
     try {
       const tools = await this.mcpClient.listTools();
+      this.discoveredTools = tools;
       if (!silent) new Notice(`Connected to Glean (${tools.length} tools available)`);
       else console.log(`[GTFO] Auto-reconnected to Glean (${tools.length} tools)`);
 
@@ -199,9 +214,40 @@ export default class GtfoPlugin extends Plugin {
     }
   }
 
+  /**
+   * Re-query the server for its current tool list and update
+   * `discoveredTools`. Safe to call when not connected — it just
+   * clears the list.
+   */
+  async refreshTools(): Promise<void> {
+    if (!this.mcpClient.connected) {
+      this.discoveredTools = [];
+      return;
+    }
+    try {
+      this.discoveredTools = await this.mcpClient.listTools();
+    } catch (e) {
+      console.warn("[GTFO] listTools failed:", e);
+      this.discoveredTools = [];
+    }
+  }
+
+  isToolEnabled(name: string): boolean {
+    return !this.settings.disabledTools.includes(name);
+  }
+
+  async setToolEnabled(name: string, enabled: boolean): Promise<void> {
+    const disabled = new Set(this.settings.disabledTools);
+    if (enabled) disabled.delete(name);
+    else disabled.add(name);
+    this.settings.disabledTools = [...disabled].sort();
+    await this.saveSettings();
+  }
+
   async disconnect(): Promise<void> {
     await this.mcpClient.disconnect();
     this.data.oauthTokens = undefined;
+    this.discoveredTools = [];
     await this.saveData(this.data);
   }
 

@@ -148,12 +148,34 @@ User sends message
   → buildVaultListing(entries, { maxChars, vaultName })
     - Tree-grouped, tag-annotated
     - Degrades to folder summary above maxChars
-  → runtimeBlock = runtime + listing
+  → VaultTools.readActiveFile()  (when chip is attached)
+    - app.workspace.getActiveFile() + vault.read()
+  → buildOpenFileContext(file, { maxChars })
+    - Path header + fenced markdown body
+    - Truncated bodies are flagged so the LLM won't propose a destructive overwrite
+  → runtimeBlock = runtime + listing + openFile  (joined by blank lines, empty parts dropped)
   → On first turn:   bootstrap + runtimeBlock + "User: ${text}"
     On later turns:  runtimeBlock + text
 ```
 
 The `metadataCache` integration is notable — we don't build our own index. Obsidian already parses every note into a fresh `CachedMetadata` record (frontmatter, tags, headings, links, embeds). Reading it is O(1) per file, so rebuilding the listing on every chat turn is essentially free even for vaults with thousands of notes.
+
+### Open-file context + Restore
+
+The chat tab shows a "context chip" above the input with the basename of the markdown file currently active in the workspace. The chip listens to `workspace.on("file-open")` and `workspace.on("active-leaf-change")` so it tracks reality without polling. Clicking the chip flips between `attached` (default — file body ships in the runtime block) and `detached` (chip stays visible but the body is omitted, useful when the user wants to ask about something unrelated to the open note).
+
+When the LLM proposes an `edit_note` / `append_note` / `create_note` / `move_note` action, `executeAction` snapshots the previous state **before** running the operation. On success, the snapshot is wrapped in a `RestoreInfo` whose `apply()` is the inverse:
+
+| Action          | Restore semantics                                              |
+| --------------- | -------------------------------------------------------------- |
+| `edit_note`     | Write the captured original content back                       |
+| `append_note`   | Truncate back to the captured pre-append content               |
+| `create_note`   | Delete the new file (or restore the file it overwrote)         |
+| `move_note`     | Move the file from `targetPath` back to `path`                 |
+
+The Restore button is appended to the action row alongside "Done" so the user can revert the last change without re-prompting the model. Action rows live for the lifetime of the assistant message, so multiple turns each have their own Restore history.
+
+`insert_at_cursor`, `link_notes`, and `run_command` deliberately don't get restore — undoing them safely requires tracking ranges or arbitrary side effects that aren't worth the complexity.
 
 ### LLM action execution
 

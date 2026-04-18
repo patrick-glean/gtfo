@@ -243,6 +243,37 @@ export class GtfoSettingTab extends PluginSettingTab {
           }),
       );
 
+    new Setting(containerEl)
+      .setName("Attach the open file")
+      .setDesc(
+        "Send the path and body of the markdown file you currently have open as part of the chat context, so requests like 'rewrite this with a stronger tone' resolve to the file you're looking at. The chat shows a chip you can click to detach per-session. Successful edits get a one-click Restore button.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.includeOpenFile)
+          .onChange(async (value) => {
+            this.plugin.settings.includeOpenFile = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Open file size cap (chars)")
+      .setDesc(
+        "Hard limit on how much of the open file's body we ship. Long files get truncated and the LLM is told not to overwrite a truncated file (would erase the missing tail).",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("12000")
+          .setValue(String(this.plugin.settings.openFileMaxChars))
+          .onChange(async (value) => {
+            const parsed = parseInt(value, 10);
+            this.plugin.settings.openFileMaxChars =
+              Number.isFinite(parsed) && parsed > 0 ? parsed : 12000;
+            await this.plugin.saveSettings();
+          }),
+      );
+
     // --- Terminal ---
     containerEl.createEl("h3", { text: "Terminal" });
 

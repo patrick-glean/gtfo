@@ -52,15 +52,29 @@ ACTION SHAPES (path is vault-relative, includes the .md extension):
 - {"type": "link_notes", "path": "source.md", "targetPath": "target.md"}
 - {"type": "run_command", "command": "shell command to execute"}
 
-Trigger phrases that MUST populate "actions" with a create_note:
+Trigger phrases that MUST populate "actions" with a create_note (a NEW note):
 - "write me a note about..."
 - "create a note..."
 - "save this as a note..."
 - "make a note on..."
 
+Trigger phrases that MUST populate "actions" with an edit_note against the OPEN FILE (only when an Open file block is present in the runtime context):
+- "rewrite this..." / "rewrite the note..." / "rewrite my note..."
+- "reword this..." / "reword it..."
+- "write this like a <tone/style>" (e.g. "write this like a pirate", "write this more formally")
+- "make this <tone>" (e.g. "make this funnier", "make this shorter")
+- "change the tone of this..."
+- "edit this..." / "fix this up..." / "clean this up..."
+- "update this note..." (when not clearly asking for an append)
+- any ask that means "apply a revision to what I'm looking at"
+
 The action's "content" field should be complete standalone note content (with frontmatter if appropriate), not a reference to your prose. The fenced block is for the plugin only and is stripped from the message before rendering — don't repeat its content in your prose.
 
 VAULT LISTING: When a "Vault listing" block is in the runtime context, treat it as the inventory of the user's vault. Each line is: a leading "- ", then the full vault-relative path (which includes the .md extension and may contain spaces and dashes, e.g. meetings/Meeting - 2_30 PM Today.md), then optionally two spaces and a quoted heading, then optionally two spaces and a list of #tags. COPY paths verbatim from the listing into action.path / action.targetPath — never reconstruct them from parts, never strip the .md, never split on dashes.
+
+OPEN FILE: When an "Open file" block is in the runtime context, that is the note the user currently has open in their editor. Deictic references in the user's message — "this", "this note", "this document", "the doc I'm in", "rewrite this", "my open file" — refer to this file unless they obviously name something else. To modify it in place, propose ONE \`edit_note\` action with \`path\` set to the open file's path verbatim and \`content\` set to the COMPLETE rewritten body (edit_note overwrites — partial content erases the rest). Use \`append_note\` to add to the end without rewriting. The user has a "Restore original" button after every edit, so prefer a real edit over a tentative diff in prose. If the open file body shows a "[truncated]" marker, the actual file is longer than what you can see — refuse to overwrite (it would erase the missing tail) and propose append_note or a narrower edit instead.
+
+PRESERVE FRONTMATTER ON EDIT: When proposing edit_note against a file whose body starts with a YAML frontmatter block (\`---\\n...\\n---\`), copy that frontmatter verbatim into the new content unless the user explicitly asks to change it. Dropping frontmatter silently loses tags, aliases, and other vault metadata.
 
 ORGANIZING: When the user asks to organize, clean up, reorganize, or sort their vault, propose a sequence of move_note actions in one obsidian_metadata block — the user has an "Execute all" button to apply them as a batch. Group by name prefix, tags, or topic. Keep proposals conservative — don't rename files, don't change content, only move. Put the rationale in the prose body so the user can review before executing.`;
 
@@ -226,6 +240,41 @@ export function buildVaultListing(
     `${entries.length} notes (full listing was ${Math.round(full.length / 1024)}KB; ` +
     `showing folder summary only — ask the user to narrow the scope or use Ctrl+Enter search to find specific files):`;
   return [truncatedHeader, ...folderLines].join("\n");
+}
+
+/**
+ * Format the file the user is currently editing as an "Open file" block
+ * for the runtime context. Returns "" when no file is supplied.
+ *
+ * The body is fenced as ```markdown so the LLM treats it as the file's
+ * literal contents rather than as instructions to follow. Long files
+ * are truncated at `maxChars` and a "[truncated …]" marker is appended
+ * — the bootstrap tells the LLM not to overwrite a truncated file
+ * (an edit_note with the visible portion would erase the missing tail).
+ */
+export function buildOpenFileContext(
+  file: { path: string; content: string } | null,
+  opts: { maxChars?: number } = {},
+): string {
+  if (!file) return "";
+  const max = opts.maxChars ?? 12000;
+  const total = file.content.length;
+  let body = file.content;
+  let truncated = false;
+  if (total > max) {
+    body = body.slice(0, max);
+    truncated = true;
+  }
+  const header =
+    `Open file (${file.path}) — the note the user currently has open ` +
+    `in their editor. Deictic references like "this" or "this document" ` +
+    `mean this file. Use \`edit_note\` with this exact path to overwrite ` +
+    `it; the user has a "Restore original" button after every edit.`;
+  const meta = truncated
+    ? `[truncated to ${max} of ${total} chars — DO NOT propose edit_note ` +
+      `that would erase the missing tail; use append_note or a narrower edit]`
+    : `[${total} chars]`;
+  return `${header}\n${meta}\n\n\`\`\`markdown\n${body}\n\`\`\``;
 }
 
 /**

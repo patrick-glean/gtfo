@@ -1,4 +1,4 @@
-import { MarkdownRenderer, Notice } from "obsidian";
+import { type EventRef, MarkdownRenderer, Notice, TFile } from "obsidian";
 import type GtfoPlugin from "../../main";
 import type {
   ChatMessage,
@@ -11,6 +11,7 @@ import type {
 import type { MCPProgress } from "../../mcp/client";
 import {
   DEFAULT_BOOTSTRAP,
+  buildOpenFileContext,
   buildRuntimeContext,
   buildVaultListing,
   expandTemplatePlaceholders,
@@ -57,6 +58,25 @@ interface PendingRequest {
   tickTimer: number | null;
 }
 
+/**
+ * Pre-action snapshot bundled with the inverse operation that puts the
+ * vault back the way it was. Returned alongside successful destructive
+ * actions (edit_note, append_note, create_note, move_note) so the
+ * action row can offer a one-click Restore. Each action type builds
+ * its own `apply` so the row UI stays generic — it just shows a button
+ * that calls `restore.apply()`.
+ */
+interface RestoreInfo {
+  label: string;
+  tooltip: string;
+  apply: () => Promise<void>;
+}
+
+interface ActionResult {
+  ok: boolean;
+  restore?: RestoreInfo;
+}
+
 export class ChatTab {
   private container: HTMLElement;
   private plugin: GtfoPlugin;
@@ -64,9 +84,26 @@ export class ChatTab {
   private inputEl: HTMLTextAreaElement | null = null;
   private hintEl: HTMLElement | null = null;
   private sendBtn: HTMLButtonElement | null = null;
+  private contextStripEl: HTMLElement | null = null;
   private messages: ChatMessage[] = [];
   private chatId: string | undefined;
   private pending: PendingRequest | null = null;
+  /**
+   * User-controlled toggle for the open-file context chip. When false,
+   * the chip is shown as "detached" and the file body is NOT included
+   * in the runtime block. Per-session — switching files re-attaches
+   * (a fresh file is a fresh decision).
+   */
+  private openFileAttached = true;
+  /** Path of the file the chip is currently pinned to, for re-attach detection. */
+  private chipFilePath: string | null = null;
+  /**
+   * Workspace event subscriptions for the open-file chip. Captured here
+   * (rather than via plugin.registerEvent) so destroy() can release
+   * them when the sidebar view closes — otherwise reopening the view
+   * would stack a new pair of listeners on every cycle.
+   */
+  private workspaceEventRefs: EventRef[] = [];
 
   constructor(container: HTMLElement, plugin: GtfoPlugin) {
     this.container = container;
@@ -86,6 +123,23 @@ export class ChatTab {
 
     this.messagesEl = wrapper.createDiv({ cls: "gtfo-chat-messages" });
     this.renderMessages();
+
+    this.contextStripEl = wrapper.createDiv({ cls: "gtfo-chat-context-strip" });
+    this.renderContextStrip();
+
+    // Keep the chip in sync as the user switches files in Obsidian.
+    // file-open fires for explicit opens; active-leaf-change covers
+    // alt-tabbing between already-open leaves (including non-markdown
+    // ones, where the chip should disappear).
+    const ws = this.plugin.app.workspace;
+    this.workspaceEventRefs.push(
+      ws.on("file-open", (file) => this.handleActiveFileChanged(file)),
+    );
+    this.workspaceEventRefs.push(
+      ws.on("active-leaf-change", () =>
+        this.handleActiveFileChanged(ws.getActiveFile()),
+      ),
+    );
 
     const inputContainer = wrapper.createDiv({
       cls: "gtfo-chat-input-container",
@@ -139,6 +193,85 @@ export class ChatTab {
   onShow(): void {
     this.inputEl?.focus();
     this.scrollToBottom();
+    // The active file may have changed while the chat tab was hidden
+    // (or the view was reopened). Re-sync the chip on every show so it
+    // never lags reality.
+    this.renderContextStrip();
+  }
+
+  /**
+   * Release workspace event subscriptions. Called by the sidebar view
+   * on close so we don't accumulate listeners across view re-opens.
+   */
+  destroy(): void {
+    const ws = this.plugin.app.workspace;
+    for (const ref of this.workspaceEventRefs) ws.offref(ref);
+    this.workspaceEventRefs = [];
+  }
+
+  /**
+   * Sidebar event hook: when the user switches to a different file
+   * in Obsidian, repaint the chip and reset the per-session attached
+   * toggle. Treating each new file as freshly attached matches user
+   * intuition — detaching one note doesn't permanently mute the
+   * feature for the next note they open.
+   */
+  private handleActiveFileChanged(file: TFile | null): void {
+    const newPath = file && file.extension === "md" ? file.path : null;
+    if (newPath !== this.chipFilePath) {
+      this.openFileAttached = true;
+      this.chipFilePath = newPath;
+    }
+    this.renderContextStrip();
+  }
+
+  /**
+   * Render the chip strip above the chat input. Three states:
+   *   - feature off in settings: render nothing
+   *   - no markdown file open: render nothing
+   *   - file open: render a chip with basename + attach toggle
+   */
+  private renderContextStrip(): void {
+    const el = this.contextStripEl;
+    if (!el) return;
+    el.empty();
+
+    if (!this.plugin.settings.includeOpenFile) return;
+
+    const info = this.plugin.vaultTools.getActiveFileInfo();
+    if (!info) {
+      this.chipFilePath = null;
+      return;
+    }
+    this.chipFilePath = info.path;
+
+    const chip = el.createDiv({
+      cls: `gtfo-chat-context-chip ${
+        this.openFileAttached
+          ? "gtfo-chat-context-chip--attached"
+          : "gtfo-chat-context-chip--detached"
+      }`,
+      attr: {
+        title: this.openFileAttached
+          ? `Open file (attached to chat context):\n${info.path}\n\nClick to detach — file body won't be sent with the next message.`
+          : `Open file (detached from chat context):\n${info.path}\n\nClick to re-attach.`,
+      },
+    });
+
+    chip.createSpan({ cls: "gtfo-chat-context-chip-icon", text: "📄" });
+    chip.createSpan({
+      cls: "gtfo-chat-context-chip-label",
+      text: info.basename,
+    });
+    chip.createSpan({
+      cls: "gtfo-chat-context-chip-state",
+      text: this.openFileAttached ? "attached" : "detached",
+    });
+
+    chip.addEventListener("click", () => {
+      this.openFileAttached = !this.openFileAttached;
+      this.renderContextStrip();
+    });
   }
 
   /**
@@ -254,9 +387,10 @@ export class ChatTab {
         const vaultName = this.plugin.app.vault.getName();
         const runtime = buildRuntimeContext({ vaultName });
         const listing = this.buildVaultListingBlock(vaultName);
-        const runtimeBlock = listing
-          ? `${runtime}\n\n${listing}`
-          : runtime;
+        const openFile = await this.buildOpenFileBlock();
+        const runtimeBlock = [runtime, listing, openFile]
+          .filter((b) => b.length > 0)
+          .join("\n\n");
         const fullMessage = this.chatId
           ? `${runtimeBlock}\n\n${text}`
           : `${bootstrap}\n\n${runtimeBlock}\n\n---\n\nUser: ${text}`;
@@ -328,7 +462,11 @@ export class ChatTab {
       }
     } catch (e) {
       const reqMs = Math.round(performance.now() - t0);
-      const classified = classifyMcpError(e, settings.mcpRequestTimeoutMs);
+      const classified = classifyMcpError(
+        e,
+        settings.mcpRequestTimeoutMs,
+        reqMs,
+      );
       this.messages.pop(); // remove loading
       // Include elapsed time on the error message so the header still
       // reads "Glean  req 12.3s · cancelled" for consistency with
@@ -515,6 +653,27 @@ export class ChatTab {
       });
     } catch (e) {
       console.warn("[GTFO] vault listing failed:", e);
+      return "";
+    }
+  }
+
+  /**
+   * Build the open-file block that ships with the runtime context.
+   * Returns "" when the feature is off, the user has detached the chip,
+   * no markdown file is open, or the read fails. The chip in the UI
+   * is the source of truth — buildOpenFileBlock just translates the
+   * current chip state into bytes for the LLM.
+   */
+  private async buildOpenFileBlock(): Promise<string> {
+    const s = this.plugin.settings;
+    if (!s.includeOpenFile) return "";
+    if (!this.openFileAttached) return "";
+    try {
+      const file = await this.plugin.vaultTools.readActiveFile();
+      if (!file) return "";
+      return buildOpenFileContext(file, { maxChars: s.openFileMaxChars });
+    } catch (e) {
+      console.warn("[GTFO] open file context failed:", e);
       return "";
     }
   }
@@ -745,9 +904,37 @@ export class ChatTab {
       new Notice(`Saved: ${path}`);
     });
 
+    // "Replace open file" only renders when a markdown file is actually
+    // open. It's the manual counterpart to the LLM's edit_note action —
+    // one click overwrites the file with the response body, with a
+    // Restore button that writes the snapshot back. Takes precedence
+    // over "Insert at cursor" in button order because it's usually
+    // what the user means by "apply this to my note".
+    const activeInfo = this.plugin.vaultTools.getActiveFileInfo();
+    if (activeInfo) {
+      const replaceBtn = actions.createEl("button", {
+        text: "Replace open file",
+        cls: "gtfo-result-btn",
+        attr: {
+          title: `Overwrite ${activeInfo.path} with this response.\nA Restore button will appear after — safe to try.`,
+        },
+      });
+      replaceBtn.addEventListener("click", () =>
+        this.replaceOpenFile(
+          expandTemplatePlaceholders(bodyText),
+          replaceBtn,
+          actions,
+        ),
+      );
+    }
+
     const insertBtn = actions.createEl("button", {
-      text: "Insert to Note",
+      text: "Insert at cursor",
       cls: "gtfo-result-btn",
+      attr: {
+        title:
+          "Insert this response at your cursor position in the last-active markdown note, wrapped in a blockquote callout.",
+      },
     });
     insertBtn.addEventListener("click", () =>
       this.insertToNote(expandTemplatePlaceholders(bodyText)),
@@ -761,6 +948,71 @@ export class ChatTab {
       await navigator.clipboard.writeText(bodyText);
       new Notice("Copied to clipboard");
     });
+  }
+
+  /**
+   * Overwrite the currently active markdown file with the assistant
+   * message's body. Snapshots the previous content first so we can
+   * append a one-click Restore button to the same action row —
+   * identical semantics to an LLM-proposed edit_note but triggered
+   * by the user. Swallowing errors into a Notice matches the rest
+   * of the chat-tab action buttons.
+   */
+  private async replaceOpenFile(
+    content: string,
+    btn: HTMLButtonElement,
+    rowEl: HTMLElement,
+  ): Promise<void> {
+    btn.disabled = true;
+    const original = btn.textContent ?? "Replace open file";
+    btn.textContent = "Replacing…";
+    try {
+      const result = await this.plugin.vaultTools.overwriteActiveFile(content);
+      if (!result) {
+        btn.disabled = false;
+        btn.textContent = original;
+        new Notice("No active markdown file to replace — open a note first.");
+        return;
+      }
+      this.plugin.recordAction("noteEdited");
+      btn.textContent = "Replaced";
+      btn.addClass("gtfo-action-btn--done");
+      new Notice(`Replaced ${result.path}`);
+
+      // Inline Restore mirrors the per-action Restore UX on LLM
+      // edit_note rows. One snapshot per invocation; clicking again
+      // would reset to the post-edit state, which is rarely useful,
+      // so the button disables itself after a successful restore.
+      const restoreBtn = rowEl.createEl("button", {
+        text: "Restore original",
+        cls: "gtfo-result-btn gtfo-action-restore-btn",
+        attr: {
+          title: `Restore ${result.path} to its previous content (${result.previousContent.length} chars).`,
+        },
+      });
+      restoreBtn.addEventListener("click", async () => {
+        restoreBtn.disabled = true;
+        const prev = restoreBtn.textContent ?? "Restore original";
+        restoreBtn.textContent = "Restoring…";
+        try {
+          await this.plugin.vaultTools.editNote(
+            result.path,
+            result.previousContent,
+          );
+          restoreBtn.textContent = "Restored";
+          restoreBtn.addClass("gtfo-action-restore-btn--done");
+          new Notice("Restored.");
+        } catch (e) {
+          restoreBtn.disabled = false;
+          restoreBtn.textContent = prev;
+          new Notice(`Restore failed: ${e}`);
+        }
+      });
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = original;
+      new Notice(`Replace failed: ${e}`);
+    }
   }
 
   /**
@@ -840,18 +1092,48 @@ export class ChatTab {
 
     type Row = {
       action: LlmAction;
+      el: HTMLElement;
       btn: HTMLButtonElement;
       done: boolean;
+      restoreBtn?: HTMLButtonElement;
     };
     const rows: Row[] = [];
 
-    const markRow = (row: Row, ok: boolean): void => {
+    const attachRestore = (row: Row, info: RestoreInfo): void => {
+      if (row.restoreBtn) return;
+      const btn = row.el.createEl("button", {
+        text: info.label,
+        cls: "gtfo-result-btn gtfo-action-restore-btn",
+        attr: { title: info.tooltip },
+      });
+      row.restoreBtn = btn;
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        const original = btn.textContent ?? info.label;
+        btn.textContent = "Restoring…";
+        try {
+          await info.apply();
+          btn.textContent = "Restored";
+          btn.addClass("gtfo-action-restore-btn--done");
+          new Notice("Restored.");
+        } catch (e) {
+          btn.textContent = original;
+          btn.disabled = false;
+          new Notice(`Restore failed: ${e}`);
+        }
+      });
+    };
+
+    const markRow = (row: Row, result: ActionResult): void => {
       row.done = true;
       row.btn.disabled = true;
-      row.btn.textContent = ok ? "Done" : "Failed";
+      row.btn.textContent = result.ok ? "Done" : "Failed";
       row.btn.removeClass("gtfo-action-btn--done");
       row.btn.removeClass("gtfo-action-btn--failed");
-      row.btn.addClass(ok ? "gtfo-action-btn--done" : "gtfo-action-btn--failed");
+      row.btn.addClass(
+        result.ok ? "gtfo-action-btn--done" : "gtfo-action-btn--failed",
+      );
+      if (result.ok && result.restore) attachRestore(row, result.restore);
     };
 
     let execAllBtn: HTMLButtonElement | null = null;
@@ -870,9 +1152,9 @@ export class ChatTab {
         for (let i = 0; i < pending.length; i++) {
           const row = pending[i];
           execAllBtn.textContent = `Running ${i + 1}/${pending.length}...`;
-          const ok = await this.executeAction(row.action);
-          markRow(row, ok);
-          if (ok) okCount++;
+          const result = await this.executeAction(row.action);
+          markRow(row, result);
+          if (result.ok) okCount++;
           else failCount++;
         }
         execAllBtn.textContent =
@@ -900,15 +1182,15 @@ export class ChatTab {
         text: "Execute",
         cls: "gtfo-result-btn gtfo-action-btn",
       });
-      const row: Row = { action, btn: execBtn, done: false };
+      const row: Row = { action, el: actionEl, btn: execBtn, done: false };
       rows.push(row);
 
       execBtn.addEventListener("click", async () => {
         if (row.done) return;
         execBtn.disabled = true;
         execBtn.textContent = "Running...";
-        const ok = await this.executeAction(action);
-        markRow(row, ok);
+        const result = await this.executeAction(action);
+        markRow(row, result);
       });
     }
   }
@@ -934,7 +1216,7 @@ export class ChatTab {
     }
   }
 
-  private async executeAction(action: LlmAction): Promise<boolean> {
+  private async executeAction(action: LlmAction): Promise<ActionResult> {
     const { vaultTools, gateway } = this.plugin;
 
     // Defensive fallback: LLMs sometimes emit {{date}} / {{time}} / {{title}}
@@ -951,38 +1233,94 @@ export class ChatTab {
       switch (action.type) {
         case "create_note":
           if (action.path && content) {
-            await vaultTools.createNote(action.path, content);
+            const path = action.path;
+            // Snapshot any pre-existing file at this path. If the LLM
+            // proposes create_note over an existing file, restore writes
+            // back the original. If the path was empty, restore deletes
+            // the new file.
+            const previousContent = await this.snapshotIfExists(path);
+            await vaultTools.createNote(path, content);
             this.plugin.recordAction("noteCreated");
-            new Notice(`Created: ${action.path}`);
+            new Notice(`Created: ${path}`);
+            const restore: RestoreInfo =
+              previousContent !== null
+                ? {
+                    label: "Restore original",
+                    tooltip: `Overwrite ${path} with the previous content (${previousContent.length} chars).`,
+                    apply: async () =>
+                      vaultTools.editNote(path, previousContent),
+                  }
+                : {
+                    label: "Undo create",
+                    tooltip: `Delete the newly created note ${path}.`,
+                    apply: async () => vaultTools.deleteNote(path),
+                  };
+            return { ok: true, restore };
           }
           break;
         case "edit_note":
           if (action.path && content) {
-            await vaultTools.editNote(action.path, content);
+            const path = action.path;
+            const previousContent = await this.snapshotIfExists(path);
+            await vaultTools.editNote(path, content);
             this.plugin.recordAction("noteEdited");
-            new Notice(`Updated: ${action.path}`);
+            new Notice(`Updated: ${path}`);
+            if (previousContent !== null) {
+              return {
+                ok: true,
+                restore: {
+                  label: "Restore original",
+                  tooltip: `Restore ${path} to its previous content (${previousContent.length} chars).`,
+                  apply: async () => vaultTools.editNote(path, previousContent),
+                },
+              };
+            }
+            return { ok: true };
           }
           break;
         case "append_note":
           if (action.path && content) {
-            await vaultTools.appendToNote(action.path, content);
+            const path = action.path;
+            const previousContent = await this.snapshotIfExists(path);
+            await vaultTools.appendToNote(path, content);
             this.plugin.recordAction("noteEdited");
-            new Notice(`Appended to: ${action.path}`);
+            new Notice(`Appended to: ${path}`);
+            if (previousContent !== null) {
+              return {
+                ok: true,
+                restore: {
+                  label: "Restore original",
+                  tooltip: `Drop the appended chunk (${content.length} chars) and restore ${path}.`,
+                  apply: async () => vaultTools.editNote(path, previousContent),
+                },
+              };
+            }
+            return { ok: true };
           }
           break;
         case "insert_at_cursor":
           if (content) {
             const ok = await vaultTools.insertAtCursor(content);
             new Notice(ok ? "Inserted at cursor" : "No active editor");
-            if (!ok) return false;
+            if (!ok) return { ok: false };
             this.plugin.recordAction("cursorInsert");
           }
           break;
         case "move_note":
           if (action.path && action.targetPath) {
-            await vaultTools.moveNote(action.path, action.targetPath);
+            const from = action.path;
+            const to = action.targetPath;
+            await vaultTools.moveNote(from, to);
             this.plugin.recordAction("noteMoved");
-            new Notice(`Moved to: ${action.targetPath}`);
+            new Notice(`Moved to: ${to}`);
+            return {
+              ok: true,
+              restore: {
+                label: "Restore (move back)",
+                tooltip: `Move ${to} back to ${from}.`,
+                apply: async () => vaultTools.moveNote(to, from),
+              },
+            };
           }
           break;
         case "link_notes":
@@ -1000,15 +1338,28 @@ export class ChatTab {
                 ? `Command succeeded`
                 : `Command failed (exit ${result.exitCode})`,
             );
-            if (result.exitCode !== 0) return false;
+            if (result.exitCode !== 0) return { ok: false };
             this.plugin.recordAction("commandRun");
           }
           break;
       }
-      return true;
+      return { ok: true };
     } catch (e) {
       new Notice(`Action failed: ${e}`);
-      return false;
+      return { ok: false };
+    }
+  }
+
+  /**
+   * Read a note's current content if it exists, returning null if it
+   * doesn't. Used to capture the pre-action state for Restore. Distinct
+   * from a thrown error so callers can branch on "did the file exist?".
+   */
+  private async snapshotIfExists(path: string): Promise<string | null> {
+    try {
+      return await this.plugin.vaultTools.readNote(path);
+    } catch {
+      return null;
     }
   }
 
@@ -1136,6 +1487,7 @@ type McpErrorKind = "cancelled" | "timeout" | "other";
 function classifyMcpError(
   err: unknown,
   timeoutMs: number,
+  reqMs: number,
 ): { kind: McpErrorKind; content: string } {
   const name = (err as { name?: string } | null)?.name ?? "";
   const msg = String((err as { message?: string } | null)?.message ?? err ?? "");
@@ -1148,16 +1500,24 @@ function classifyMcpError(
     };
   }
 
-  const isTimeout =
-    code === -32001 || // JSONRPC RequestTimeout
-    /\brequesttimeout\b/i.test(msg) ||
-    /\btimed?\s*out\b/i.test(msg);
-  if (isTimeout) {
+  // Distinguish three timeout flavors so the user gets the right hint:
+  //   1. SDK-level timeout: JSONRPC RequestTimeout / "RequestTimeout"
+  //      string. Always honor the configured timeout in the message.
+  //   2. Network/socket timeout: "timed out" / "Network request timed
+  //      out" coming from the gateway or upstream. Show the elapsed
+  //      time and tell the user it isn't the configured timeout —
+  //      otherwise they'll keep bumping it with no effect.
+  //   3. Anything else with "timed out" in the message — same as (2).
+  const isSdkTimeout =
+    code === -32001 || /\brequesttimeout\b/i.test(msg);
+  const isNetworkTimeout = /\btimed?\s*out\b/i.test(msg);
+
+  if (isSdkTimeout) {
     const seconds = Math.round(timeoutMs / 1000);
     return {
       kind: "timeout",
       content:
-        `**Request timed out** after ${seconds}s.\n\n` +
+        `**Request timed out** after ${seconds}s (the configured Request timeout).\n\n` +
         `If Glean chats in your tenant routinely take longer, bump ` +
         `**Settings → Glean Connection → Request timeout** and keep ` +
         `**Reset timeout on progress** on so streamed updates count ` +
@@ -1165,10 +1525,32 @@ function classifyMcpError(
     };
   }
 
+  if (isNetworkTimeout) {
+    const elapsed = formatElapsed(reqMs);
+    const configured = Math.round(timeoutMs / 1000);
+    const earlyExit = reqMs < timeoutMs * 0.9;
+    const earlyExitNote = earlyExit
+      ? `\n\nThis is **not** the configured ${configured}s Request timeout — ` +
+        `it's a lower-level network/socket timeout. Bumping the request ` +
+        `timeout in settings won't help. Likely causes: a proxy, VPN, or ` +
+        `the Glean server itself dropping idle connections; or the ` +
+        `transport not honoring the abort signal.`
+      : "";
+    return {
+      kind: "timeout",
+      content: `**Network request timed out** after ${elapsed}.${earlyExitNote}`,
+    };
+  }
+
   return {
     kind: "other",
     content: `**Error:** ${msg || String(err)}`,
   };
+}
+
+function formatElapsed(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 function estimateTokens(text: string): number {

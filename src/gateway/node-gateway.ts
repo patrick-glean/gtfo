@@ -22,6 +22,13 @@ import type {
  * - Add logging, rate limiting, or caching in one place
  */
 export class NodeGateway {
+  /**
+   * Default timeout for `exec()` (shell command runtime). HTTP requests
+   * intentionally have no default — callers (or the MCP SDK's own
+   * AbortSignal-based timeout) are responsible for setting one. A
+   * default-timeout-on-fetch was removed because it silently capped
+   * MCP chat calls below the user-configured value.
+   */
   private defaultTimeout: number;
 
   constructor(options?: GatewayOptions) {
@@ -36,13 +43,21 @@ export class NodeGateway {
     return new Promise((resolve, reject) => {
       const url = new URL(req.url);
       const mod = url.protocol === "https:" ? https : http;
-      const timeout = req.timeout ?? this.defaultTimeout;
+      // Only impose a socket-inactivity timeout when the caller asked
+      // for one. Historically we fell back to a 30s default here, which
+      // silently capped MCP chat calls regardless of the user's
+      // configured per-request timeout (the MCP SDK manages its own
+      // timeout via an AbortSignal that we already plumb through). Any
+      // caller that wants a hard cap can pass `timeout` explicitly.
+      const timeout = req.timeout;
 
       const options: https.RequestOptions = {
         method: req.method || "GET",
         headers: req.headers || {},
-        timeout,
       };
+      if (timeout !== undefined && timeout > 0) {
+        options.timeout = timeout;
+      }
 
       if (req.signal?.aborted) {
         reject(new DOMException("Aborted", "AbortError"));
@@ -109,10 +124,18 @@ export class NodeGateway {
         reject(new TypeError(`Network request failed: ${err.message}`));
       });
 
-      nodeReq.on("timeout", () => {
-        nodeReq.destroy();
-        reject(new TypeError("Request timed out"));
-      });
+      // Only register a timeout handler when the caller actually set one.
+      // Without this guard, Node would still keep the socket idle forever
+      // (no timeout property == no timeout event), but registering a no-op
+      // handler is wasteful and historically led to confusion.
+      if (timeout !== undefined && timeout > 0) {
+        nodeReq.on("timeout", () => {
+          nodeReq.destroy();
+          reject(
+            new TypeError(`Network request timed out after ${timeout}ms`),
+          );
+        });
+      }
 
       if (req.signal) {
         const onAbort = () => {

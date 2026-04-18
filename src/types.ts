@@ -32,6 +32,21 @@ export interface GtfoSettings {
   vaultListingExcludes: string;
   vaultListingMaxChars: number;
   /**
+   * Attach the currently active markdown file (path + body) to every
+   * outgoing chat message. Lets the user say "rewrite this with a
+   * stronger tone" and have the LLM target the file they're looking at,
+   * propose `edit_note` actions against it, and so on. The chip in the
+   * chat tab reflects the live state and can be detached per-session.
+   */
+  includeOpenFile: boolean;
+  /**
+   * Hard cap on the number of characters of the active file we ship in
+   * the runtime block. Long files get truncated with a note so the LLM
+   * knows the body isn't complete (and shouldn't propose a destructive
+   * edit_note that would erase the missing tail).
+   */
+  openFileMaxChars: number;
+  /**
    * MCP tools the user has turned off in the Tools settings panel.
    * Calls to these names will throw before hitting the server. Enables
    * quick containment of noisy or misbehaving tools without a restart.
@@ -65,6 +80,8 @@ export const DEFAULT_SETTINGS: GtfoSettings = {
   includeVaultListing: true,
   vaultListingExcludes: "",
   vaultListingMaxChars: 6000,
+  includeOpenFile: true,
+  openFileMaxChars: 12000,
   disabledTools: [],
 };
 

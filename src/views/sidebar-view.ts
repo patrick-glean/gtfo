@@ -74,6 +74,7 @@ export class GtfoSidebarView extends ItemView {
 
   async onClose(): Promise<void> {
     this.terminalTab?.destroy();
+    this.chatTab?.destroy();
     this.chatTab = null;
     this.terminalTab = null;
     this.tabPanels = {};

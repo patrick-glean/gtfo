@@ -640,6 +640,109 @@
   color: var(--text-error, #c0392b) !important;
 }
 
+/* ------- Open-file context chip ------- */
+.gtfo-chat-context-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 10px 0;
+  background: var(--gtfo-surface-1);
+  flex-shrink: 0;
+}
+
+.gtfo-chat-context-strip:empty {
+  display: none;
+}
+
+.gtfo-chat-context-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  font-size: 11px;
+  border: 1px solid var(--gtfo-border);
+  border-radius: 9999px;
+  background: var(--gtfo-surface-2);
+  cursor: pointer;
+  user-select: none;
+  transition: all 120ms ease;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.gtfo-chat-context-chip:hover {
+  border-color: var(--gtfo-border-strong);
+}
+
+.gtfo-chat-context-chip-icon {
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.gtfo-chat-context-chip-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  color: var(--gtfo-text);
+}
+
+.gtfo-chat-context-chip-state {
+  flex-shrink: 0;
+  font-family: var(--gtfo-font-mono);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.gtfo-chat-context-chip--attached {
+  border-color: var(--gtfo-accent);
+}
+
+.gtfo-chat-context-chip--attached .gtfo-chat-context-chip-state {
+  background: var(--gtfo-accent);
+  color: var(--gtfo-accent-text);
+}
+
+.gtfo-chat-context-chip--detached {
+  opacity: 0.65;
+}
+
+.gtfo-chat-context-chip--detached .gtfo-chat-context-chip-state {
+  background: var(--gtfo-surface-3);
+  color: var(--gtfo-text-faint);
+  border: 1px solid var(--gtfo-border);
+}
+
+/* ------- Restore button on completed actions ------- */
+.gtfo-action-restore-btn {
+  margin-left: 6px;
+  border-color: var(--gtfo-border) !important;
+  color: var(--gtfo-text-muted) !important;
+  font-weight: 500;
+}
+
+.gtfo-action-restore-btn:hover {
+  color: var(--gtfo-text) !important;
+  border-color: var(--gtfo-border-strong) !important;
+  background: var(--gtfo-hover) !important;
+}
+
+.gtfo-action-restore-btn--done {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.gtfo-action-restore-btn--done:hover {
+  background: transparent !important;
+  color: var(--gtfo-text-muted) !important;
+}
+
 /* ------- Chat input area ------- */
 .gtfo-chat-input-container {
   display: flex;

@@ -1,54 +1,49 @@
 /**
- * The structured response protocol between GTFO and the LLM.
+ * GTFO ↔ LLM protocol.
  *
- * The bootstrap text teaches the LLM to respond with this schema.
- * The plugin parses it to render UI and execute actions.
+ * The LLM responds in NATURAL Markdown — same as it would in a normal
+ * chat. We don't wrap responses in a JSON envelope; that turned out to
+ * fight Glean's response shape (the agent splits text fragments around
+ * inline citations, which made envelope-style JSON unparseable across
+ * fragments and erased citation positioning).
+ *
+ * The only structured contract: optionally append ONE fenced code
+ * block at the END of the reply, tagged `obsidian_metadata`,
+ * containing a JSON object with any of these optional fields:
+ *
+ *   { "title", "tags", "summary", "actions" }
+ *
+ * The plugin parses the block, strips it from the rendered body, and
+ * uses the structured fields for things like Save-as-Note (title +
+ * tags) and the action panel (actions). All fields are optional.
  */
 
-import type { VaultEntry } from "../types";
+import type { LlmAction, ObsidianMetadata, VaultEntry } from "../types";
 
-export interface LlmResponse {
-  title: string;
-  body: string;
-  actions?: LlmAction[];
-}
+export type { LlmAction, ObsidianMetadata } from "../types";
 
-export interface LlmAction {
-  type: "create_note" | "edit_note" | "append_note" | "insert_at_cursor" | "move_note" | "link_notes" | "run_command";
-  path?: string;
-  content?: string;
-  targetPath?: string;
-  command?: string;
-}
+export const DEFAULT_BOOTSTRAP = `You are running inside an Obsidian plugin called GTFO (Glean Tab For Obsidian). Your reply renders as Markdown directly into a chat panel — write naturally, like you would in any chat. Use headings, lists, code blocks, callouts, links, etc.
 
-export const DEFAULT_BOOTSTRAP = `You are running inside an Obsidian plugin called GTFO (Glean Tab For Obsidian). Your responses are parsed by the plugin and rendered in Obsidian.
+OBSIDIAN_METADATA: At the END of your reply, append ONE fenced code block tagged \`obsidian_metadata\` containing a JSON object describing the reply:
 
-ALL responses MUST be a JSON object with this exact schema (no text outside the JSON):
-
+\`\`\`obsidian_metadata
 {
-  "llmresponse": {
-    "title": "A short title for this response (5-10 words)",
-    "body": "The full response in Markdown format.",
-    "actions": []
-  }
+  "title": "Short note title (5-10 words)",
+  "tags": ["one-or-two-word", "lowercase-tags"],
+  "summary": "Optional 1-2 sentence summary of the answer.",
+  "actions": []
 }
+\`\`\`
 
-The "body" field uses Markdown: headings, lists, links, code blocks, callouts, etc.
+All fields are OPTIONAL but you should normally include "title" and "tags" — the plugin uses them when the user clicks Save as Note (without them we have to guess from the prose). Use "actions" only when the user explicitly asks for a vault operation.
 
-ACTIONS: The "actions" array tells the plugin to perform vault operations. Include actions when the user asks to write, create, save, edit, or move notes.
+Field guidance:
+- "title": title-case, 5-10 words, summarizes what the answer is about.
+- "tags": 2-5 short lowercase tags (no leading #). Match existing vault tags from the Vault listing when reasonable.
+- "summary": one or two sentences, standalone (don't start with "this is about…").
+- "actions": vault / shell operations — see ACTION SHAPES below. Omit the field (or use an empty array) when no operations are needed.
 
-Trigger phrases that MUST produce a create_note action:
-- "write me a note about..."
-- "create a note..."
-- "save this as a note..."
-- "make a note on..."
-
-When triggered, include:
-{"type": "create_note", "path": "notes/descriptive-name.md", "content": "full markdown content of the note"}
-
-The "content" in the action should be the complete, standalone note content (with frontmatter if appropriate), NOT a reference to the body. The "body" should be a brief summary of what was created.
-
-All available action types:
+ACTION SHAPES (path is vault-relative, includes the .md extension):
 - {"type": "create_note", "path": "folder/name.md", "content": "full markdown"}
 - {"type": "edit_note", "path": "existing.md", "content": "new full content"}
 - {"type": "append_note", "path": "existing.md", "content": "content to append"}
@@ -57,12 +52,93 @@ All available action types:
 - {"type": "link_notes", "path": "source.md", "targetPath": "target.md"}
 - {"type": "run_command", "command": "shell command to execute"}
 
-When a "Vault listing" block is present in the runtime context, treat it as the authoritative inventory of the user's vault. Each line is: a leading "- ", then the full vault-relative path (which includes the .md extension and may contain spaces and dashes, e.g. meetings/Meeting - 2_30 PM Today.md), then optionally two spaces and a quoted heading, then optionally two spaces and a list of #tags. COPY paths verbatim from the listing into action.path / action.targetPath — never reconstruct them from parts, never strip the .md, never split on dashes.
+Trigger phrases that MUST populate "actions" with a create_note:
+- "write me a note about..."
+- "create a note..."
+- "save this as a note..."
+- "make a note on..."
 
-ORGANIZING: When the user asks to organize, clean up, reorganize, or sort their vault, read the vault listing and propose a sequence of move_note actions in a single response. The user has an "Execute all" button to run them as a batch, so you can propose many at once. Group by name prefix, tags, or obvious topic. Keep proposals conservative — don't rename files, don't change content, only move. Put the rationale in the body so the user can review before executing.
+The action's "content" field should be complete standalone note content (with frontmatter if appropriate), not a reference to your prose. The fenced block is for the plugin only and is stripped from the message before rendering — don't repeat its content in your prose.
 
-For pure Q&A with no vault operation requested, omit the actions array.
-ALWAYS respond with valid JSON only.`;
+VAULT LISTING: When a "Vault listing" block is in the runtime context, treat it as the inventory of the user's vault. Each line is: a leading "- ", then the full vault-relative path (which includes the .md extension and may contain spaces and dashes, e.g. meetings/Meeting - 2_30 PM Today.md), then optionally two spaces and a quoted heading, then optionally two spaces and a list of #tags. COPY paths verbatim from the listing into action.path / action.targetPath — never reconstruct them from parts, never strip the .md, never split on dashes.
+
+ORGANIZING: When the user asks to organize, clean up, reorganize, or sort their vault, propose a sequence of move_note actions in one obsidian_metadata block — the user has an "Execute all" button to apply them as a batch. Group by name prefix, tags, or topic. Keep proposals conservative — don't rename files, don't change content, only move. Put the rationale in the prose body so the user can review before executing.`;
+
+const METADATA_BLOCK_RE = /```obsidian_metadata\s*\n([\s\S]*?)\n```/i;
+
+/**
+ * Find the `obsidian_metadata` fenced code block in the markdown body
+ * and parse its JSON payload as an ObsidianMetadata object. Returns
+ * an empty object when no block is present, when the JSON is malformed,
+ * or when the payload isn't an object.
+ *
+ * Tolerates a few common drift modes:
+ *   - `tags` as a single string → split on commas/whitespace
+ *   - `tags` with leading `#` → stripped
+ *   - `actions` as a single object → wrapped in array
+ *   - unknown fields → ignored (forward-compat)
+ */
+export function extractObsidianMetadata(body: string): ObsidianMetadata {
+  if (!body) return {};
+  const m = body.match(METADATA_BLOCK_RE);
+  if (!m) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(m[1]);
+  } catch {
+    return {};
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {};
+  }
+  const obj = parsed as Record<string, unknown>;
+  const out: ObsidianMetadata = {};
+
+  if (typeof obj.title === "string" && obj.title.trim()) {
+    out.title = obj.title.trim();
+  }
+  if (typeof obj.summary === "string" && obj.summary.trim()) {
+    out.summary = obj.summary.trim();
+  }
+  if (Array.isArray(obj.tags)) {
+    const tags = obj.tags
+      .filter((t): t is string => typeof t === "string")
+      .map((t) => t.replace(/^#/, "").trim())
+      .filter((t) => t.length > 0);
+    if (tags.length > 0) out.tags = tags;
+  } else if (typeof obj.tags === "string") {
+    const tags = obj.tags
+      .split(/[\s,]+/)
+      .map((t) => t.replace(/^#/, "").trim())
+      .filter((t) => t.length > 0);
+    if (tags.length > 0) out.tags = tags;
+  }
+  if (Array.isArray(obj.actions)) {
+    const actions = obj.actions.filter(
+      (a): a is LlmAction =>
+        typeof a === "object" &&
+        a !== null &&
+        typeof (a as { type?: unknown }).type === "string",
+    );
+    if (actions.length > 0) out.actions = actions;
+  } else if (
+    obj.actions &&
+    typeof obj.actions === "object" &&
+    typeof (obj.actions as { type?: unknown }).type === "string"
+  ) {
+    out.actions = [obj.actions as LlmAction];
+  }
+  return out;
+}
+
+/**
+ * Remove the obsidian_metadata fenced block (and any trailing whitespace
+ * left behind) so the user doesn't see the raw JSON in the rendered
+ * markdown. Returns the body unchanged if no block is present.
+ */
+export function stripMetadataBlock(body: string): string {
+  return body.replace(METADATA_BLOCK_RE, "").trimEnd();
+}
 
 /**
  * Build a short "runtime context" block that gets prepended to every
@@ -102,23 +178,8 @@ export function buildRuntimeContext(
 
 /**
  * Format a vault listing as a flat list of full paths for LLM context.
- *
- * The format is deliberately flat (one full vault-relative path per line,
- * `.md` included) instead of a tree. Tree formatting is more compact but
- * forces the LLM to reconstruct paths from indented filenames + parent
- * folder labels, which is fragile when filenames contain dashes or other
- * "structural-looking" characters (e.g. "Meeting - 2_30 PM Today.md").
- *
- * Per-line format:
- *   - {path}[  "{h1}"][  #tag1 #tag2]
- *
- * Two-space separators after the path act as field delimiters; the `.md`
- * extension acts as a visual terminator for the path. Quotes around the
- * H1 keep it unambiguous when it contains spaces, dashes, or punctuation.
- *
- * The result is capped at `maxChars` — when the full listing would
- * exceed the cap, we drop to a folder-only summary with counts so the
- * LLM can still reason about structure without blowing the context window.
+ * See the original docstring (unchanged behavior) — the LLM uses these
+ * paths verbatim in its action.path / action.targetPath fields.
  */
 export function buildVaultListing(
   entries: VaultEntry[],
@@ -136,7 +197,6 @@ export function buildVaultListing(
 
   for (const e of entries) {
     let line = `- ${e.path}`;
-    // Show the H1 only when it adds signal beyond the filename
     if (
       e.h1 &&
       e.h1.trim() &&
@@ -153,8 +213,6 @@ export function buildVaultListing(
   const full = lines.join("\n");
   if (full.length <= max) return full;
 
-  // Fall back to a folder-only summary so the LLM can still reason about
-  // structure without blowing the context budget.
   const byFolder = new Map<string, number>();
   for (const e of entries) {
     const f = e.folder || "(root)";
@@ -166,7 +224,7 @@ export function buildVaultListing(
   const truncatedHeader =
     `Vault listing${opts.vaultName ? ` (${opts.vaultName})` : ""} — ` +
     `${entries.length} notes (full listing was ${Math.round(full.length / 1024)}KB; ` +
-    `showing folder summary only — ask the user to narrow the scope or use Opt+Enter search to find specific files):`;
+    `showing folder summary only — ask the user to narrow the scope or use Ctrl+Enter search to find specific files):`;
   return [truncatedHeader, ...folderLines].join("\n");
 }
 
@@ -174,9 +232,6 @@ export function buildVaultListing(
  * Minimal moment.js-compatible date formatter. Supports the tokens the
  * LLM is most likely to emit: YYYY, YY, MMMM, MMM, MM, M, DD, D, dddd,
  * ddd, HH, H, mm, m, ss, s. Unknown tokens pass through unchanged.
- *
- * The regex alternation is ordered longest-first so e.g. `MMMM` wins
- * over `MM` and `M`.
  */
 export function formatDate(d: Date, format: string): string {
   return format.replace(
@@ -254,60 +309,4 @@ export function expandTemplatePlaceholders(
 export function titleFromPath(path: string): string {
   const base = path.split("/").pop() ?? path;
   return base.replace(/\.md$/i, "");
-}
-
-/**
- * Parse an LLM response string into a structured LlmResponse.
- * Handles both raw JSON and JSON embedded in markdown code blocks.
- */
-export function parseLlmResponse(raw: string): LlmResponse | null {
-  const trimmed = raw.trim();
-
-  // Try direct parse
-  const direct = tryParse(trimmed);
-  if (direct) return direct;
-
-  // Try extracting from markdown code block
-  const codeBlockMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
-  if (codeBlockMatch) {
-    const parsed = tryParse(codeBlockMatch[1].trim());
-    if (parsed) return parsed;
-  }
-
-  // Try finding JSON object in the string
-  const jsonStart = trimmed.indexOf("{");
-  const jsonEnd = trimmed.lastIndexOf("}");
-  if (jsonStart >= 0 && jsonEnd > jsonStart) {
-    const parsed = tryParse(trimmed.substring(jsonStart, jsonEnd + 1));
-    if (parsed) return parsed;
-  }
-
-  // Fallback: treat entire response as unstructured
-  return {
-    title: "Response",
-    body: raw,
-  };
-}
-
-function tryParse(text: string): LlmResponse | null {
-  try {
-    const obj = JSON.parse(text);
-    if (obj.llmresponse) {
-      return {
-        title: obj.llmresponse.title || "Response",
-        body: obj.llmresponse.body || "",
-        actions: obj.llmresponse.actions || undefined,
-      };
-    }
-    if (obj.title && obj.body) {
-      return {
-        title: obj.title,
-        body: obj.body,
-        actions: obj.actions || undefined,
-      };
-    }
-  } catch {
-    // not valid JSON
-  }
-  return null;
 }

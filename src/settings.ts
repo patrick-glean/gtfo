@@ -1,6 +1,7 @@
 import { App, PluginSettingTab, Setting, Notice } from "obsidian";
 import type GtfoPlugin from "./main";
 import { DEFAULT_BOOTSTRAP } from "./llm/protocol";
+import type { GtfoStats } from "./types";
 
 export class GtfoSettingTab extends PluginSettingTab {
   plugin: GtfoPlugin;
@@ -28,6 +29,40 @@ export class GtfoSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.mcpServerUrl)
           .onChange(async (value) => {
             this.plugin.settings.mcpServerUrl = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Request timeout (seconds)")
+      .setDesc(
+        "Per-request timeout for chat and search calls. Raise this if long Glean conversations hit the timeout. SDK default is 60s; GTFO default is 180s.",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("180")
+          .setValue(
+            String(Math.round(this.plugin.settings.mcpRequestTimeoutMs / 1000)),
+          )
+          .onChange(async (value) => {
+            const parsed = parseInt(value, 10);
+            const seconds =
+              Number.isFinite(parsed) && parsed > 0 ? parsed : 180;
+            this.plugin.settings.mcpRequestTimeoutMs = seconds * 1000;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Reset timeout on progress")
+      .setDesc(
+        "When the server sends a progress notification, restart the timeout clock. Keep this on so long-running chats that stream status updates don't hard-timeout between messages.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.mcpResetTimeoutOnProgress)
+          .onChange(async (value) => {
+            this.plugin.settings.mcpResetTimeoutOnProgress = value;
             await this.plugin.saveSettings();
           }),
       );
@@ -298,5 +333,98 @@ export class GtfoSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           }),
       );
+
+    // --- Usage Stats ---
+    this.renderStatsSection(containerEl);
   }
+
+  private renderStatsSection(containerEl: HTMLElement): void {
+    containerEl.createEl("h3", { text: "Usage Stats" });
+    const stats = this.plugin.stats;
+
+    const sinceDate = new Date(stats.since);
+    const sinceLabel = sinceDate.toLocaleString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+
+    new Setting(containerEl)
+      .setName("Tracking since")
+      .setDesc(sinceLabel);
+
+    const block = containerEl.createEl("div", { cls: "gtfo-stats-block" });
+    const rows = buildStatRows(stats);
+    for (const [label, value] of rows) {
+      if (label === "---") {
+        block.createEl("div", { cls: "gtfo-stats-divider" });
+        continue;
+      }
+      const row = block.createEl("div", { cls: "gtfo-stats-row" });
+      row.createEl("span", { text: label, cls: "gtfo-stats-label" });
+      row.createEl("span", { text: value, cls: "gtfo-stats-value" });
+    }
+
+    new Setting(containerEl)
+      .setName("Reset stats")
+      .setDesc("Zero out all counters and set the tracking-since timestamp to now. Cannot be undone.")
+      .addButton((button) =>
+        button
+          .setButtonText("Reset")
+          .setWarning()
+          .onClick(async () => {
+            await this.plugin.resetStats();
+            new Notice("Usage stats reset.");
+            this.display();
+          }),
+      );
+  }
+}
+
+function buildStatRows(stats: GtfoStats): [string, string][] {
+  const totalRequests =
+    stats.chatRequests + stats.searchRequests;
+  const avgReqMs =
+    totalRequests > 0 ? stats.totalReqMs / totalRequests : 0;
+
+  return [
+    ["Chat requests", formatNum(stats.chatRequests)],
+    ["Search requests", formatNum(stats.searchRequests)],
+    ["Cancelled", formatNum(stats.cancelledRequests)],
+    ["Timed out", formatNum(stats.timedOutRequests)],
+    ["Failed (other)", formatNum(stats.failedRequests)],
+    ["Avg response time", avgReqMs > 0 ? formatMs(avgReqMs) : "—"],
+    ["Total response time", formatMs(stats.totalReqMs)],
+    ["Total tokens (est)", formatNum(stats.totalTokens)],
+    ["Total bytes", formatBytes(stats.totalBytes)],
+    ["---", ""],
+    ["Notes created", formatNum(stats.notesCreated)],
+    ["Notes edited", formatNum(stats.notesEdited)],
+    ["Notes moved", formatNum(stats.notesMoved)],
+    ["Notes linked", formatNum(stats.notesLinked)],
+    ["Cursor inserts", formatNum(stats.cursorInserts)],
+    ["Commands run", formatNum(stats.commandsRun)],
+  ];
+}
+
+function formatNum(n: number): string {
+  return n.toLocaleString();
+}
+
+function formatMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const min = Math.floor(ms / 60_000);
+  const sec = Math.round((ms - min * 60_000) / 1000);
+  return `${min}m ${sec}s`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  if (bytes < 1024 * 1024 * 1024)
+    return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`;
 }

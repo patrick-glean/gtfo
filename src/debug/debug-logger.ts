@@ -1,4 +1,5 @@
 import type { VaultTools } from "../tools/vault-tools";
+import type { ObsidianMetadata } from "../types";
 
 export interface DebugRequest {
   mode: "chat" | "search" | "tool";
@@ -12,8 +13,14 @@ export interface DebugResult {
   reqMs: number;
   response: unknown;
   extractedContent?: string;
-  parsedLlmResponse?: unknown;
+  /**
+   * Structured fields parsed out of the assistant's `obsidian_metadata`
+   * fenced block (title, tags, summary, actions). Undefined when no
+   * block was present.
+   */
+  metadata?: ObsidianMetadata;
   error?: string;
+  errorKind?: "cancelled" | "timeout" | "other";
 }
 
 export class DebugLogger {
@@ -125,12 +132,11 @@ export class DebugLogger {
       lines.push("");
     }
 
-    // Parsed llmresponse
-    if (result.parsedLlmResponse) {
-      lines.push("## Parsed llmresponse");
+    if (result.metadata) {
+      lines.push("## Obsidian Metadata");
       lines.push("");
       lines.push("```json");
-      lines.push(JSON.stringify(result.parsedLlmResponse, null, 2));
+      lines.push(JSON.stringify(result.metadata, null, 2));
       lines.push("```");
       lines.push("");
     }

@@ -20,8 +20,8 @@ graph TD
 
         subgraph llm [LLM Protocol]
             Bootstrap[bootstrap text]
-            Parser[parseLlmResponse]
-            Protocol[llmresponse schema]
+            Parser[extractObsidianMetadata]
+            Protocol[obsidian_metadata block]
         end
 
         subgraph tools [Capabilities]
@@ -74,27 +74,33 @@ User types, presses Enter
   → NodeGateway.asFetch() (CORS-free)
   → Glean MCP Server
   → Response: { content: [{ type: "text", text: "..." }] }
-  → extractRawContent pulls nested llmresponse JSON out of the
-    YAML-like serialized chat response
-  → parseLlmResponse → { title, body, actions }
-  → Loading replaced with assistant message + metrics
-    (req_ms, tokens, bytes)
-  → Markdown renders, action buttons appear if any
-  → If debug mode is on, DebugLogger writes a full dump note
+  → extractRawContent → assembleMarkdownFromContent walks the YAML
+    blob, finds the messageType: CONTENT block, concatenates every
+    text fragment. Result is the LLM's natural-markdown reply.
+  → extractObsidianMetadata scans the body for an `obsidian_metadata`
+    fenced JSON block and parses it into { title?, tags?, summary?,
+    actions? } (or returns {}).
+  → stripMetadataBlock removes the fenced block from the body.
+  → extractSourcesFromResponse pulls structured + cited documents.
+  → Loading replaced with assistant message + metrics, citations,
+    and metadata stored on the message.
+  → MarkdownRenderer renders the body; tag pills, sources panel,
+    and actions panel render below. Save-as-Note uses metadata.title
+    + metadata.tags for filename + frontmatter.
+  → If debug mode is on, DebugLogger writes a full dump note.
 ```
 
-### Search (Opt+Enter in chat)
+### Search (Ctrl+Enter in chat)
 
 ```
-User types, presses Opt+Enter
+User types, presses Ctrl+Enter (or Cmd/Opt+Enter)
   → ChatTab.sendMessage("search")
   → User message prefixed with 🔍 for visual distinction
   → GleanMCPClient.search(query)
   → parseSearchResults from MCP response
-  → Results formatted as llmresponse-shaped Markdown list
-    (so the same renderer handles them)
+  → Results formatted as a plain Markdown bullet list (no JSON wrap)
   → Rendered inline in the same chat conversation
-  → Metrics shown (req_ms, tokens, bytes)
+  → Metrics shown (req_ms, N results, bytes — no "tokens")
 ```
 
 ### New chat
@@ -203,20 +209,30 @@ All Node.js operations route through `NodeGateway` (`src/gateway/node-gateway.ts
 
 ### LLM Protocol
 
-Rather than building a custom agent loop, the plugin uses a **bootstrap text** (system prompt) to teach Glean's LLM a structured JSON response schema:
+Rather than building a custom agent loop, the plugin uses a **bootstrap text** (system prompt) to teach Glean's LLM a tiny convention: respond in natural Markdown, and append one fenced `obsidian_metadata` JSON block at the end of every reply with optional `title`, `tags`, `summary`, and `actions`.
 
-```json
-{ "llmresponse": { "title": "...", "body": "markdown...", "actions": [...] } }
+```markdown
+Here's the summary you asked for…
+
+```obsidian_metadata
+{
+  "title": "Glean Org Chart Quick Start",
+  "tags": ["org-chart", "glean", "people"],
+  "summary": "How to find your team in Glean's Directory.",
+  "actions": []
+}
+```
 ```
 
 Benefits:
 
 - No separate LLM needed — Glean's chat is the brain
 - Protocol is human-editable (settings tab)
-- LLM proposes vault operations via `actions`
-- Degrades gracefully — if JSON parsing fails, the raw text renders
+- LLM responds in natural markdown — no JSON envelope to fight Glean's response shape, citation positioning is preserved, fragmented streaming works
+- Title and tags arrive **with** the response, so Save-as-Note doesn't need a follow-up LLM call to figure out what to call the note
+- The `obsidian_metadata` block is small, easy to find with a regex, and gets stripped from the body before render so the user never sees the raw JSON
 
-Responses are wrapped in nested YAML by the Glean MCP server, so the parser searches for `"llmresponse"` and extracts the balanced JSON object (handling both escaped and unescaped forms).
+The previous design wrapped every response in `{"llmresponse": {"title", "body", "actions"}}`. Glean's agent splits text fragments around inline citations, which made the JSON unparseable across multi-fragment responses and erased the citation boundaries. The new minimal contract avoids both problems and adds richer side-info (tags, summary) without bloating the response.
 
 ### Persistent tab state
 
@@ -244,7 +260,7 @@ Every capability is a `ToolDefinition` with `{ name, description, parameters, ex
 
 When enabled:
 
-- Every Glean chat/search request writes a note with the full raw response, structural analysis, extracted content, parsed llmresponse, and timing.
+- Every Glean chat/search request writes a note with the full raw response, structural analysis, extracted markdown content, parsed `obsidian_actions`, and timing.
 - Every terminal spawn logs shell + args + cwd + size.
 - Every PTY in/out byte is JSON-escaped and appended to a terminal log note (debounced at 250ms to avoid thrashing the vault).
 

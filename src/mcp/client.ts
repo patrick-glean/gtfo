@@ -12,6 +12,27 @@ export interface MCPConnectionOptions {
   gateway: NodeGateway;
 }
 
+export interface MCPProgress {
+  progress: number;
+  total?: number;
+  message?: string;
+}
+
+export interface MCPCallOptions {
+  /** Abort signal. When aborted, the SDK throws an AbortError. */
+  signal?: AbortSignal;
+  /** Per-request timeout in milliseconds. SDK default is 60s. */
+  timeout?: number;
+  /** Reset the timeout each time a progress notification arrives. */
+  resetTimeoutOnProgress?: boolean;
+  /**
+   * Called on each progress notification from the server. Glean may or
+   * may not emit these — when it does, `message` carries a human-readable
+   * status string.
+   */
+  onProgress?: (progress: MCPProgress) => void;
+}
+
 export class GleanMCPClient {
   private client: Client | null = null;
   private transport: StreamableHTTPClientTransport | null = null;
@@ -85,28 +106,52 @@ export class GleanMCPClient {
   async callTool(
     name: string,
     args: Record<string, unknown> = {},
+    options: MCPCallOptions = {},
   ): Promise<unknown> {
     this.ensureConnected();
-    const result = await this.client!.callTool({ name, arguments: args });
+    const requestOptions: Record<string, unknown> = {};
+    if (options.signal) requestOptions.signal = options.signal;
+    if (options.timeout !== undefined) requestOptions.timeout = options.timeout;
+    if (options.resetTimeoutOnProgress !== undefined) {
+      requestOptions.resetTimeoutOnProgress = options.resetTimeoutOnProgress;
+    }
+    if (options.onProgress) {
+      requestOptions.onprogress = options.onProgress;
+    }
+    const result = await this.client!.callTool(
+      { name, arguments: args },
+      undefined,
+      requestOptions as Parameters<Client["callTool"]>[2],
+    );
     return result;
   }
 
-  async search(query: string): Promise<unknown> {
-    return this.callTool("search", { query });
+  async search(query: string, options: MCPCallOptions = {}): Promise<unknown> {
+    return this.callTool("search", { query }, options);
   }
 
-  async chat(message: string, chatId?: string): Promise<unknown> {
+  async chat(
+    message: string,
+    chatId?: string,
+    options: MCPCallOptions = {},
+  ): Promise<unknown> {
     const args: Record<string, unknown> = { message };
     if (chatId) args.chatId = chatId;
-    return this.callTool("chat", args);
+    return this.callTool("chat", args, options);
   }
 
-  async readDocument(url: string): Promise<unknown> {
-    return this.callTool("read_document", { url });
+  async readDocument(
+    url: string,
+    options: MCPCallOptions = {},
+  ): Promise<unknown> {
+    return this.callTool("read_document", { url }, options);
   }
 
-  async employeeSearch(query: string): Promise<unknown> {
-    return this.callTool("employee_search", { query });
+  async employeeSearch(
+    query: string,
+    options: MCPCallOptions = {},
+  ): Promise<unknown> {
+    return this.callTool("employee_search", { query }, options);
   }
 
   private ensureConnected(): void {

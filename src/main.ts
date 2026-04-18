@@ -10,10 +10,25 @@ import { ToolRegistry } from "./tools/tool-registry";
 import { NoteInserter } from "./utils/note-inserter";
 import { DebugLogger } from "./debug/debug-logger";
 import { GtfoSettingTab } from "./settings";
-import { DEFAULT_SETTINGS, type GtfoSettings } from "./types";
+import {
+  DEFAULT_SETTINGS,
+  DEFAULT_STATS,
+  type GtfoSettings,
+  type GtfoStats,
+} from "./types";
+
+export type ErrorKind = "cancelled" | "timeout" | "other";
+export type ActionKind =
+  | "noteCreated"
+  | "noteEdited"
+  | "noteMoved"
+  | "noteLinked"
+  | "cursorInsert"
+  | "commandRun";
 
 interface GtfoData {
   settings: GtfoSettings;
+  stats: GtfoStats;
   oauthTokens?: OAuthTokens;
   oauthClientInfo?: OAuthClientInformationFull;
   oauthCodeVerifier?: string;
@@ -21,6 +36,7 @@ interface GtfoData {
 
 export default class GtfoPlugin extends Plugin {
   settings: GtfoSettings = DEFAULT_SETTINGS;
+  stats: GtfoStats = { ...DEFAULT_STATS };
   gateway: NodeGateway = new NodeGateway();
   mcpClient: GleanMCPClient = new GleanMCPClient();
   terminalManager: TerminalManager = new TerminalManager();
@@ -29,7 +45,7 @@ export default class GtfoPlugin extends Plugin {
   noteInserter!: NoteInserter;
   debugLogger!: DebugLogger;
 
-  private data: GtfoData = { settings: DEFAULT_SETTINGS };
+  private data: GtfoData = { settings: DEFAULT_SETTINGS, stats: { ...DEFAULT_STATS } };
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -217,6 +233,7 @@ export default class GtfoPlugin extends Plugin {
     if (loaded) {
       this.data = { ...this.data, ...loaded };
       this.settings = { ...DEFAULT_SETTINGS, ...this.data.settings };
+      this.stats = { ...DEFAULT_STATS, ...(this.data.stats ?? {}) };
     }
   }
 
@@ -224,6 +241,75 @@ export default class GtfoPlugin extends Plugin {
     this.data.settings = this.settings;
     await this.saveData(this.data);
     this.configureTerminalDebug();
+  }
+
+  private saveStatsScheduled: number | null = null;
+
+  /**
+   * Persist the current stats object. Debounced so a burst of action
+   * executions (e.g. "Execute all" running 30 move_note actions)
+   * doesn't hammer disk with 30 saves.
+   */
+  private scheduleStatsSave(): void {
+    if (this.saveStatsScheduled !== null) return;
+    this.saveStatsScheduled = window.setTimeout(() => {
+      this.saveStatsScheduled = null;
+      this.data.stats = this.stats;
+      void this.saveData(this.data);
+    }, 500);
+  }
+
+  recordChatRequest(reqMs: number, tokens: number, bytes: number): void {
+    this.stats.chatRequests++;
+    this.stats.totalReqMs += reqMs;
+    this.stats.totalTokens += tokens;
+    this.stats.totalBytes += bytes;
+    this.scheduleStatsSave();
+  }
+
+  recordSearchRequest(reqMs: number, tokens: number, bytes: number): void {
+    this.stats.searchRequests++;
+    this.stats.totalReqMs += reqMs;
+    this.stats.totalTokens += tokens;
+    this.stats.totalBytes += bytes;
+    this.scheduleStatsSave();
+  }
+
+  recordError(kind: ErrorKind): void {
+    if (kind === "cancelled") this.stats.cancelledRequests++;
+    else if (kind === "timeout") this.stats.timedOutRequests++;
+    else this.stats.failedRequests++;
+    this.scheduleStatsSave();
+  }
+
+  recordAction(kind: ActionKind): void {
+    switch (kind) {
+      case "noteCreated":
+        this.stats.notesCreated++;
+        break;
+      case "noteEdited":
+        this.stats.notesEdited++;
+        break;
+      case "noteMoved":
+        this.stats.notesMoved++;
+        break;
+      case "noteLinked":
+        this.stats.notesLinked++;
+        break;
+      case "cursorInsert":
+        this.stats.cursorInserts++;
+        break;
+      case "commandRun":
+        this.stats.commandsRun++;
+        break;
+    }
+    this.scheduleStatsSave();
+  }
+
+  async resetStats(): Promise<void> {
+    this.stats = { ...DEFAULT_STATS, since: Date.now() };
+    this.data.stats = this.stats;
+    await this.saveData(this.data);
   }
 
   /**

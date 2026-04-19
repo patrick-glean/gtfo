@@ -1,6 +1,6 @@
 import { ItemView, WorkspaceLeaf } from "obsidian";
 import type GtfoPlugin from "../main";
-import { ChatTab } from "./components/chat-tab";
+import { ChatPanel } from "./components/chat-panel";
 import { TerminalTab } from "./components/terminal-tab";
 
 export const VIEW_TYPE_GTFO = "gtfo-view";
@@ -25,7 +25,7 @@ export class GtfoSidebarView extends ItemView {
   private tabPanels: Partial<Record<TabId, HTMLElement>> = {};
   private tabButtons: Partial<Record<TabId, HTMLElement>> = {};
 
-  private chatTab: ChatTab | null = null;
+  private chatPanel: ChatPanel | null = null;
   private terminalTab: TerminalTab | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: GtfoPlugin) {
@@ -63,8 +63,8 @@ export class GtfoSidebarView extends ItemView {
       this.tabPanels[tab.id] = panel;
     }
 
-    this.chatTab = new ChatTab(this.tabPanels.chat!, this.plugin);
-    this.chatTab.render();
+    this.chatPanel = new ChatPanel(this.tabPanels.chat!, this.plugin);
+    this.chatPanel.render();
 
     this.terminalTab = new TerminalTab(this.tabPanels.terminal!, this.plugin);
     this.terminalTab.render();
@@ -74,8 +74,8 @@ export class GtfoSidebarView extends ItemView {
 
   async onClose(): Promise<void> {
     this.terminalTab?.destroy();
-    this.chatTab?.destroy();
-    this.chatTab = null;
+    this.chatPanel?.destroy();
+    this.chatPanel = null;
     this.terminalTab = null;
     this.tabPanels = {};
     this.tabButtons = {};
@@ -112,11 +112,11 @@ export class GtfoSidebarView extends ItemView {
 
     // Let the active tab know it was activated (e.g. terminal needs to re-fit)
     if (tabId === "terminal") this.terminalTab?.onShow();
-    if (tabId === "chat") this.chatTab?.onShow();
+    if (tabId === "chat") this.chatPanel?.onShow();
   }
 
   newChat(): void {
     this.setActiveTab("chat");
-    this.chatTab?.newChat();
+    this.chatPanel?.newChat();
   }
 }

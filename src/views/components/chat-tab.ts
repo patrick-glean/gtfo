@@ -77,9 +77,24 @@ interface ActionResult {
   restore?: RestoreInfo;
 }
 
+/**
+ * Optional hooks the parent ChatPanel uses to keep the session-tab
+ * strip in sync with what's happening inside an individual chat. Each
+ * is fire-and-forget — ChatTab works fine without any of them set.
+ */
+export interface ChatTabHooks {
+  /**
+   * Called when the chat's display title should change (e.g. after the
+   * first user message, or when the LLM returns metadata.title). The
+   * parent ChatPanel uses this to repaint the session tab.
+   */
+  onTitleChange?: (title: string) => void;
+}
+
 export class ChatTab {
   private container: HTMLElement;
   private plugin: GtfoPlugin;
+  private hooks: ChatTabHooks;
   private messagesEl: HTMLElement | null = null;
   private inputEl: HTMLTextAreaElement | null = null;
   private hintEl: HTMLElement | null = null;
@@ -104,22 +119,25 @@ export class ChatTab {
    * would stack a new pair of listeners on every cycle.
    */
   private workspaceEventRefs: EventRef[] = [];
+  /**
+   * Title last reported via the hook, used to suppress redundant
+   * onTitleChange callbacks (parent only repaints the tab strip when
+   * the title actually changes).
+   */
+  private reportedTitle = "";
 
-  constructor(container: HTMLElement, plugin: GtfoPlugin) {
+  constructor(
+    container: HTMLElement,
+    plugin: GtfoPlugin,
+    hooks: ChatTabHooks = {},
+  ) {
     this.container = container;
     this.plugin = plugin;
+    this.hooks = hooks;
   }
 
   render(): void {
     const wrapper = this.container.createDiv({ cls: "gtfo-chat-wrapper" });
-
-    const toolbar = wrapper.createDiv({ cls: "gtfo-chat-toolbar" });
-    const newChatBtn = toolbar.createEl("button", {
-      text: "New chat",
-      cls: "gtfo-chat-toolbar-btn",
-      attr: { title: "Start a fresh conversation (clears history and resets chatId)" },
-    });
-    newChatBtn.addEventListener("click", () => this.newChat());
 
     this.messagesEl = wrapper.createDiv({ cls: "gtfo-chat-messages" });
     this.renderMessages();
@@ -275,6 +293,38 @@ export class ChatTab {
   }
 
   /**
+   * Compute and (if changed) emit a display title for this chat. The
+   * title is whatever the LLM returned in `metadata.title` for the most
+   * recent assistant message, or — failing that — the first user
+   * message truncated to fit a tab. Empty chats show "New chat" so the
+   * tab strip never has unlabeled tabs.
+   */
+  private maybeUpdateTitle(): void {
+    if (!this.hooks.onTitleChange) return;
+
+    let next = "New chat";
+    const lastWithTitle = [...this.messages]
+      .reverse()
+      .find((m) => m.role === "assistant" && m.metadata?.title);
+    if (lastWithTitle?.metadata?.title) {
+      next = lastWithTitle.metadata.title;
+    } else {
+      const firstUser = this.messages.find((m) => m.role === "user");
+      if (firstUser) {
+        const stripped = firstUser.content.replace(/^🔍\s*/, "").trim();
+        if (stripped) next = stripped;
+      }
+    }
+
+    const truncated =
+      next.length > 28 ? `${next.substring(0, 27).trimEnd()}…` : next;
+    if (truncated !== this.reportedTitle) {
+      this.reportedTitle = truncated;
+      this.hooks.onTitleChange(truncated);
+    }
+  }
+
+  /**
    * Reset the conversation: drop in-memory messages and clear the Glean
    * chatId so the next send starts a fresh conversation (and re-sends the
    * bootstrap text). The Glean-side chat isn't explicitly ended — we just
@@ -289,6 +339,7 @@ export class ChatTab {
     this.messages = [];
     this.chatId = undefined;
     if (this.inputEl) this.inputEl.value = "";
+    this.maybeUpdateTitle();
     this.renderMessages();
     this.updateHint();
     this.inputEl?.focus();
@@ -314,6 +365,7 @@ export class ChatTab {
       timestamp: Date.now(),
     };
     this.messages.push(userMsg);
+    this.maybeUpdateTitle();
 
     if (this.inputEl) this.inputEl.value = "";
     this.updateHint();
@@ -434,6 +486,9 @@ export class ChatTab {
           citations: sources.length > 0 ? sources : undefined,
           metadata: hasMetadata ? metadata : undefined,
         });
+        // The LLM-suggested title beats our truncated-user-message
+        // fallback, so re-evaluate the tab label after every chat reply.
+        this.maybeUpdateTitle();
         this.renderMessages();
         this.scrollToBottom();
         this.plugin.recordChatRequest(reqMs, tokens, bytes);

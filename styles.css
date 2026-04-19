@@ -121,43 +121,133 @@
 /* ==========================================================================
    Chat
    ========================================================================== */
-.gtfo-chat-wrapper {
+.gtfo-chat-panel {
   display: flex;
   flex-direction: column;
   height: 100%;
   overflow: hidden;
 }
 
-/* ------- Chat toolbar ------- */
-.gtfo-chat-toolbar {
+.gtfo-chat-sessions-bodies {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.gtfo-chat-session-body {
+  display: none;
+  position: absolute;
+  inset: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.gtfo-chat-session-body--active {
   display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 6px 8px;
+}
+
+/* ------- Session tab strip ------- */
+.gtfo-chat-sessions-bar {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 4px 6px 0;
   border-bottom: 1px solid var(--gtfo-border);
   background: var(--gtfo-surface-1);
   flex-shrink: 0;
-  height: 34px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  min-height: 30px;
 }
 
-.gtfo-chat-toolbar-btn {
-  height: 22px;
-  padding: 0 10px;
+.gtfo-chat-sessions-bar::-webkit-scrollbar {
+  height: 6px;
+}
+.gtfo-chat-sessions-bar::-webkit-scrollbar-thumb {
+  background: var(--gtfo-border);
+  border-radius: 6px;
+}
+
+.gtfo-chat-session-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  max-width: 180px;
+  height: 24px;
   font-size: 11px;
   font-weight: 500;
-  border-radius: var(--gtfo-radius-sm);
-  border: 1px solid var(--gtfo-border);
-  background: var(--gtfo-surface-2);
   color: var(--gtfo-text-muted);
+  background: var(--gtfo-surface-2);
+  border: 1px solid var(--gtfo-border);
+  border-radius: var(--gtfo-radius-sm) var(--gtfo-radius-sm) 0 0;
+  border-bottom: none;
   cursor: pointer;
-  transition: all 120ms ease;
-  line-height: 1;
+  user-select: none;
+  white-space: nowrap;
+  transition: color 120ms ease, background 120ms ease;
+  flex-shrink: 0;
 }
 
-.gtfo-chat-toolbar-btn:hover {
+.gtfo-chat-session-tab:hover {
   color: var(--gtfo-text);
-  border-color: var(--gtfo-border-strong);
   background: var(--gtfo-hover);
+}
+
+.gtfo-chat-session-tab--active {
+  color: var(--gtfo-text);
+  background: var(--gtfo-surface-1);
+  border-color: var(--gtfo-border-strong);
+  position: relative;
+  /* Lift the active tab one pixel above the bottom border so it visually
+     "owns" the panel below — same trick browser tabs use. */
+  box-shadow: 0 1px 0 0 var(--gtfo-surface-1);
+}
+
+.gtfo-chat-session-tab-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gtfo-chat-session-tab-close {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--gtfo-text-faint);
+  transition: all 120ms ease;
+}
+
+.gtfo-chat-session-tab-close:hover {
+  background: var(--gtfo-hover);
+  color: var(--text-error, var(--gtfo-text));
+}
+
+.gtfo-chat-session-tab--new {
+  color: var(--gtfo-text-faint);
+  background: transparent;
+  border-color: transparent;
+  font-weight: 400;
+}
+
+.gtfo-chat-session-tab--new:hover {
+  color: var(--gtfo-accent);
+  background: var(--gtfo-hover);
+  border-color: var(--gtfo-border);
+}
+
+.gtfo-chat-wrapper {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
 }
 
 .gtfo-chat-messages {
@@ -221,6 +311,25 @@
   letter-spacing: 0;
   color: var(--gtfo-text-faint);
   text-transform: none;
+}
+
+/* Obsidian sidebar leaves opt out of text selection by default to make
+   drag-handles/tab moves feel native. We need text selection in chat
+   bodies so users can copy quotes, code, links, etc. — opt back in
+   explicitly on both bubble variants. The cursor switch helps users
+   discover the affordance. */
+.gtfo-chat-message-content,
+.gtfo-chat-message-content * {
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+}
+
+.gtfo-chat-message-content a,
+.gtfo-chat-message-content button,
+.gtfo-chat-message-content a *,
+.gtfo-chat-message-content button * {
+  cursor: pointer;
 }
 
 .gtfo-chat-message--user .gtfo-chat-message-content {

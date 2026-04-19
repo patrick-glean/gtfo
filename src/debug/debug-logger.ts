@@ -89,11 +89,32 @@ export class DebugLogger {
       lines.push("");
     }
     if (request.args) {
-      lines.push("**Arguments:**");
-      lines.push("```json");
-      lines.push(JSON.stringify(request.args, null, 2));
-      lines.push("```");
-      lines.push("");
+      // Pull `context` out for separate, readable rendering — JSON-stringifying
+      // a 6KB bootstrap with embedded newlines is unreadable. Other args
+      // still go through the JSON dump.
+      const { context, ...restArgs } = request.args as Record<string, unknown>;
+      if (Object.keys(restArgs).length > 0) {
+        lines.push("**Arguments:**");
+        lines.push("```json");
+        lines.push(JSON.stringify(restArgs, null, 2));
+        lines.push("```");
+        lines.push("");
+      }
+      if (Array.isArray(context) && context.length > 0) {
+        lines.push(`**Context entries (${context.length}):**`);
+        lines.push("");
+        context.forEach((entry, i) => {
+          const label = previewLabel(entry);
+          lines.push(`<details><summary>[${i}] ${label}</summary>`);
+          lines.push("");
+          lines.push("```");
+          lines.push(typeof entry === "string" ? entry : String(entry));
+          lines.push("```");
+          lines.push("");
+          lines.push("</details>");
+          lines.push("");
+        });
+      }
     }
 
     // Timing
@@ -212,4 +233,20 @@ export class DebugLogger {
       .replace(/(^-|-$)/g, "")
       || "request";
   }
+}
+
+/**
+ * Build a one-line collapsed-summary label for a context entry — the
+ * first non-empty line, capped to ~60 chars, with the entry's char
+ * count appended. Lets the debug note's <details> summaries scan as
+ * "what is this chunk?" without having to expand every block.
+ */
+function previewLabel(entry: unknown): string {
+  if (typeof entry !== "string") return `(${typeof entry})`;
+  const len = entry.length;
+  const firstLine =
+    entry.split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? "";
+  const truncated =
+    firstLine.length > 60 ? `${firstLine.substring(0, 57)}…` : firstLine;
+  return `${truncated}  (${len} chars)`;
 }

@@ -68,6 +68,17 @@ Trigger phrases that MUST populate "actions" with an edit_note against the OPEN 
 - "update this note..." (when not clearly asking for an append)
 - any ask that means "apply a revision to what I'm looking at"
 
+Trigger phrases that MUST populate "actions" with one or more move_note operations (against paths from the Vault listing):
+- "organize my notes" / "organize this vault" / "organize <folder>"
+- "clean up my notes" / "tidy up..." / "reorganize..."
+- "shuffle..." / "reshuffle..." / "rearrange..."
+- "move <X> to <Y>" / "put <X> under <Y>" / "relocate <X>"
+- "I don't want anything under <folder>" / "get rid of <folder>" / "flatten <folder>"
+- "consolidate <X>"
+- "split <X> into <Y> and <Z>"
+
+Negative-space interpretation: when the user says "I don't want X under Y" or "stop putting things in Z", that is a request to MOVE existing notes out of Y/Z, not just "don't add more in the future". Propose move_note actions for every existing file under the named folder.
+
 The action's "content" field should be complete standalone note content (with frontmatter if appropriate), not a reference to your prose. The fenced block is for the plugin only and is stripped from the message before rendering — don't repeat its content in your prose.
 
 VAULT LISTING: When a "Vault listing" block is in the runtime context, treat it as the inventory of the user's vault. Each line is: a leading "- ", then the full vault-relative path (which includes the .md extension and may contain spaces and dashes, e.g. meetings/Meeting - 2_30 PM Today.md), then optionally two spaces and a quoted heading, then optionally two spaces and a list of #tags. COPY paths verbatim from the listing into action.path / action.targetPath — never reconstruct them from parts, never strip the .md, never split on dashes.
@@ -76,7 +87,43 @@ OPEN FILE: When an "Open file" block is in the runtime context, that is the note
 
 PRESERVE FRONTMATTER ON EDIT: When proposing edit_note against a file whose body starts with a YAML frontmatter block (\`---\\n...\\n---\`), copy that frontmatter verbatim into the new content unless the user explicitly asks to change it. Dropping frontmatter silently loses tags, aliases, and other vault metadata.
 
-ORGANIZING: When the user asks to organize, clean up, reorganize, or sort their vault, propose a sequence of move_note actions in one obsidian_metadata block — the user has an "Execute all" button to apply them as a batch. Group by name prefix, tags, or topic. Keep proposals conservative — don't rename files, don't change content, only move. Put the rationale in the prose body so the user can review before executing.`;
+ORGANIZING (this is the most-skipped rule — don't skip it):
+When the user asks to organize / clean up / reorganize / sort / tidy / shuffle / consolidate / move / relocate / flatten — or says they don't want files in some folder — you MUST populate "actions" with concrete move_note operations. Do NOT respond with prose like "your structure is fine", "no moves needed", or "I'd suggest manually doing X". The user has an "Execute all" button and a per-action "Restore" button — they want concrete options to accept or decline, not a deliberation. If the layout genuinely already looks tight, propose at least one alternative grouping (e.g. flatten temp/<topic>/* into <topic>/, or split a catch-all folder by tag) so there's something on the table.
+
+Use vault-listing paths verbatim. "Conservative" means don't rename files and don't change content — it does NOT mean "propose nothing". Put the rationale in the prose body so the user can review before clicking Execute.`;
+
+/**
+ * Compact protocol reminder injected on follow-up turns. Glean's chat
+ * agent only sees the full bootstrap on the first message of a session;
+ * after that, attention to the original system prompt fades and the
+ * model often drops the obsidian_metadata block entirely (or returns
+ * empty actions even for clear vault-operation requests). The reminder
+ * is small enough to ship every turn cheaply but imperative enough to
+ * keep the action contract front-of-mind.
+ *
+ * Kept in code (not just bootstrap) so users who customize their
+ * bootstrap don't lose it — it always ships.
+ */
+export function buildProtocolReminder(): string {
+  return (
+    `(gtfo protocol reminder — keep this contract on EVERY reply:\n` +
+    `1. Reply in natural Markdown.\n` +
+    `2. End with ONE fenced \`\`\`obsidian_metadata\`\`\` JSON block ` +
+    `with optional title, tags, summary, and actions[].\n` +
+    `3. Action shapes: create_note, edit_note, append_note, ` +
+    `insert_at_cursor, move_note, link_notes, run_command. ` +
+    `Use vault-listing paths verbatim.\n` +
+    `4. ORGANIZE / CLEAN UP / SHUFFLE / MOVE / "I don't want X under Y" ` +
+    `requests MUST emit move_note actions — don't just describe what ` +
+    `you'd do. The user has Execute All and Restore buttons; your job ` +
+    `is to propose, not deliberate.\n` +
+    `5. REWRITE / REWORD / "write this like X" against the Open file ` +
+    `MUST emit one edit_note with the open file's path verbatim and ` +
+    `the COMPLETE rewritten body.\n` +
+    `6. Empty actions is fine ONLY for pure questions / lookups / ` +
+    `summaries — never for vault-operation requests.)`
+  );
+}
 
 const METADATA_BLOCK_RE = /```obsidian_metadata\s*\n([\s\S]*?)\n```/i;
 

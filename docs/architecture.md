@@ -69,8 +69,14 @@ User types, presses Enter
   → ChatTab.sendMessage("chat")
   → Start timing (performance.now)
   → Loading message pushed, typing indicator rendered
-  → First message only: prepend bootstrap text
-  → GleanMCPClient.chat(message, chatId)
+  → Build context[] entries: bootstrap (first turn only) + runtime + vault
+    listing + open file (if attached) + protocol reminder (follow-up turns)
+  → GleanMCPClient.chat({ message: text, chatId, context })
+    - text is JUST what the user typed
+    - context entries map to the chat tool's native `context: string[]`
+      param ("Optional previous messages for context. Will be included
+      in order before the current message."), so the model sees them
+      slotted in before the user's actual message
   → NodeGateway.asFetch() (CORS-free)
   → Glean MCP Server
   → Response: { content: [{ type: "text", text: "..." }] }
@@ -135,7 +141,7 @@ The Glean-side chat isn't explicitly ended — dropping the `chatId` is enough f
 
 ### Runtime context injection
 
-Every outgoing chat message is prepended with a short runtime block built from Obsidian's APIs, so the LLM doesn't have to guess:
+Every outgoing chat message is paired with a `context[]` array — Glean's chat tool field for "previous messages for context, included in order before the current message". We pack it with system/runtime blocks so the user's actual prompt stays uncluttered:
 
 ```
 User sends message
@@ -153,10 +159,24 @@ User sends message
   → buildOpenFileContext(file, { maxChars })
     - Path header + fenced markdown body
     - Truncated bodies are flagged so the LLM won't propose a destructive overwrite
-  → runtimeBlock = runtime + listing + openFile  (joined by blank lines, empty parts dropped)
-  → On first turn:   bootstrap + runtimeBlock + "User: ${text}"
-    On later turns:  runtimeBlock + text
+  → buildProtocolReminder()  (only on follow-up turns, when chatId is set)
+    - Compact imperative re-statement of the obsidian_metadata contract,
+      action shapes, and the rule that organize/rewrite requests MUST
+      emit actions
+  → context = first turn:   [bootstrap, runtime, listing, openFile]
+    context = later turns:  [runtime, listing, openFile, reminder]
+    (empty entries are filtered out — e.g. open file detached, listing disabled)
+  → message = text  (just what the user typed, nothing else)
 ```
+
+The split between `context` and `message` matters for two reasons:
+
+1. **Glean attends better to a clean message.** When the user's "rewrite this like a pirate" was buried inside 6KB of bootstrap + listing + reminder, the model sometimes treated the runtime block as instructions to follow. Putting it in `context[]` tells Glean these are prior-context entries, not the current ask.
+2. **Debug introspection is dramatically easier.** The debug note now renders each context entry as its own collapsible `<details>` block with a one-line summary, instead of a single 6KB JSON-escaped blob. Easy to spot which piece is bloating the request, and easy to copy-paste an individual entry out for inspection.
+
+The protocol reminder exists because Glean's chat agent only sees the verbose bootstrap on turn 1; by turn 3-4 of a multi-turn conversation, the model frequently forgets the `obsidian_metadata` block entirely (returns plain text) or returns `actions: []` for an explicit organize request. The reminder is small (~600 chars) and ships on every follow-up turn as a backstop.
+
+Future work: smarter context pruning. Today every turn ships the full vault listing and (if attached) the full open file body up to the configured caps. Better would be to summarize older turns and dynamically decide which context entries are actually relevant to the current prompt, similar to a retrieval layer.
 
 The `metadataCache` integration is notable — we don't build our own index. Obsidian already parses every note into a fresh `CachedMetadata` record (frontmatter, tags, headings, links, embeds). Reading it is O(1) per file, so rebuilding the listing on every chat turn is essentially free even for vaults with thousands of notes.
 

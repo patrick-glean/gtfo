@@ -12,6 +12,7 @@ import type { MCPProgress } from "../../mcp/client";
 import {
   DEFAULT_BOOTSTRAP,
   buildOpenFileContext,
+  buildProtocolReminder,
   buildRuntimeContext,
   buildVaultListing,
   expandTemplatePlaceholders,
@@ -440,16 +441,27 @@ export class ChatTab {
         const runtime = buildRuntimeContext({ vaultName });
         const listing = this.buildVaultListingBlock(vaultName);
         const openFile = await this.buildOpenFileBlock();
-        const runtimeBlock = [runtime, listing, openFile]
-          .filter((b) => b.length > 0)
-          .join("\n\n");
-        const fullMessage = this.chatId
-          ? `${runtimeBlock}\n\n${text}`
-          : `${bootstrap}\n\n${runtimeBlock}\n\n---\n\nUser: ${text}`;
+        // Protocol reminder ships on EVERY follow-up turn. The first
+        // turn already has the verbose bootstrap; on later turns Glean's
+        // chat agent tends to forget the obsidian_metadata contract
+        // (drops the fenced block, returns empty actions for clear
+        // organize requests). The compact reminder is a backstop.
+        const reminder = this.chatId ? buildProtocolReminder() : "";
+        // Each piece of system/runtime context goes in as its own entry
+        // in the `context` array — Glean's chat tool slots them in
+        // before the user's message in tool-input order. This keeps
+        // `message` to JUST what the user typed (way easier for the
+        // model to attend to, and way easier for us to debug). With
+        // chatId set, the server already has the bootstrap from turn 1
+        // so we don't re-ship it; we still ship the runtime pieces
+        // because they change every turn.
+        const contextEntries = this.chatId
+          ? [runtime, listing, openFile, reminder]
+          : [bootstrap, runtime, listing, openFile];
+        const context = contextEntries.filter((b) => b.length > 0);
 
         const response = await this.plugin.mcpClient.chat(
-          fullMessage,
-          this.chatId,
+          { message: text, chatId: this.chatId, context },
           callOptions,
         );
         const reqMs = Math.round(performance.now() - t0);
@@ -503,7 +515,11 @@ export class ChatTab {
               mode: "chat",
               tool: "chat",
               prompt: text,
-              args: { message: fullMessage, chatId: this.chatId },
+              args: {
+                message: text,
+                chatId: this.chatId,
+                context,
+              },
               chatId: this.chatId,
             },
             {

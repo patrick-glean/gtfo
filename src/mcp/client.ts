@@ -34,6 +34,22 @@ export interface MCPCallOptions {
   onProgress?: (progress: MCPProgress) => void;
 }
 
+/**
+ * Inputs for the Glean MCP `chat` tool. `context` maps to the tool's
+ * native `context: string[]` field — "Optional previous messages for
+ * context. Will be included in order before the current message." We
+ * use it to ship the bootstrap, runtime block, vault listing, open
+ * file, and protocol reminder as separate entries instead of bolting
+ * them onto the front of the user's actual prompt. Keeps `message` to
+ * just what the user typed, which makes the conversation easier for
+ * Glean to track and easier for us to debug.
+ */
+export interface ChatArgs {
+  message: string;
+  chatId?: string;
+  context?: string[];
+}
+
 export class GleanMCPClient {
   private client: Client | null = null;
   private transport: StreamableHTTPClientTransport | null = null;
@@ -178,13 +194,15 @@ export class GleanMCPClient {
   }
 
   async chat(
-    message: string,
-    chatId?: string,
+    args: ChatArgs,
     options: MCPCallOptions = {},
   ): Promise<unknown> {
-    const args: Record<string, unknown> = { message };
-    if (chatId) args.chatId = chatId;
-    return this.callTool("chat", args, options);
+    const toolArgs: Record<string, unknown> = { message: args.message };
+    if (args.chatId) toolArgs.chatId = args.chatId;
+    if (args.context && args.context.length > 0) {
+      toolArgs.context = args.context;
+    }
+    return this.callTool("chat", toolArgs, options);
   }
 
   async readDocument(
